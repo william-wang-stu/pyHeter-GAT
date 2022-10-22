@@ -1,0 +1,6 @@
+*.txt
+log/
+__pycache__
+nohup.out
+*.sh
+*.pkl
