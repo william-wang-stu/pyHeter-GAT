@@ -96,7 +96,7 @@ def init_args():
     parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
     parser.add_argument('--model', type=str, default='gat', help="models used")
     parser.add_argument('--seed', type=int, default=42, help='Random seed.')
-    parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train.')
+    parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
     parser.add_argument('--lr', type=float, default=0.1, help='Initial learning rate.')
     parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
     # parser.add_argument('--file-dir', type=str, required=True, help="Input file directory")

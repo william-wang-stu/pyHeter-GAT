@@ -309,8 +309,8 @@ class HeterGraphAttentionNetwork(nn.Module):
 
 class HeterdenseGAT(nn.Module):
     def __init__(
-        self, n_user, pretrained_emb,  nb_node_kinds=2,
-        nb_classes=2, n_units=[25,64], n_heads=[3],
+        self, n_user, pretrained_emb,
+        nb_node_kinds=2, nb_classes=2, n_units=[25,64], n_heads=[3],
         attn_dropout=0.5, dropout=0.1, 
         fine_tune=False, instance_normalization=True,
         d2=64, gpu_device_ids=[] 
@@ -323,13 +323,15 @@ class HeterdenseGAT(nn.Module):
 
         self.inst_norm = instance_normalization
         if self.inst_norm:
-            self.norm = nn.InstanceNorm1d(pretrained_emb.size(1), momentum=0.0, affine=True)
+            self.norm1 = nn.InstanceNorm1d(pretrained_emb.size(1), momentum=0.0, affine=True)
+            self.norm2 = nn.InstanceNorm1d(3, momentum=0.0, affine=True)
         
         # https://discuss.pytorch.org/t/can-we-use-pre-trained-word-embeddings-for-weight-initialization-in-nn-embedding/1222/2
         self.embedding = nn.Embedding(pretrained_emb.size(0), pretrained_emb.size(1))
         self.embedding.weight = nn.Parameter(pretrained_emb)
         self.embedding.weight.requires_grad = fine_tune
         n_units[0] += pretrained_emb.size(1)
+        n_units[0] += 3 # user_feats
 
         self.d = n_units[0]
         self.d1 = n_units[1]
@@ -348,12 +350,13 @@ class HeterdenseGAT(nn.Module):
         self.additive_attention = BatchAdditiveAttention(d=self.d, d1=self.d1, d2=self.d2)
         self.fc_layer = nn.Linear(in_features=self.d1*(nb_node_kinds+1), out_features=nb_classes)
     
-    def forward(self, h, vertices, hadj):
+    def forward(self, h, user_emb, vertices, hadj):
         # NOTE: h: (bs, n, fin), vertices: (bs, n), hadj: (|Rs|, bs, n, n)
         emb = self.embedding(vertices)
         if self.inst_norm:
-            emb = self.norm(emb.transpose(1, 2)).transpose(1, 2)
-        h = torch.cat((h, emb), dim=2)
+            emb = self.norm1(emb.transpose(1, 2)).transpose(1, 2)
+            user_emb = self.norm2(user_emb.transpose(1,2)).transpose(1, 2)
+        h = torch.cat((h, user_emb, emb), dim=2)
         bs, n = h.shape[:2]
         heter_embs = []
         for heter_idx, layer_stack in enumerate(self.layer_stack):

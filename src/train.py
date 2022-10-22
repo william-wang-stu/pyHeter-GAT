@@ -6,13 +6,12 @@
 2. 网路
 3. 训练测试
 """
-from random import sample
 import sys
 import os
-
 sys.path.append(os.path.dirname(os.getcwd()))
+
 from lib.log import logger
-from utils import load_pickle, save_pickle, init_args, ChunkSampler, HeterGraphDataset, sparse_batch_collate
+from utils import load_pickle, save_pickle, init_args, ChunkSampler, sparse_batch_collate
 from model import BatchGAT, BatchGAT2, HeterdenseGAT
 import numpy as np
 import time
@@ -22,13 +21,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from tensorboard_logger import tensorboard_logger
-import shutil
-import argparse
-
 from torch.utils.data import Dataset
 from utils import SubGraphSample, load_w2v_feature
-import sklearn
-from sklearn import preprocessing
 
 class DiggDataset(Dataset):
     def __init__(self, samples: SubGraphSample, embedding, args) -> None:
@@ -37,6 +31,8 @@ class DiggDataset(Dataset):
         self.labels = samples.labels
         self.feats = samples.influence_features
         self.vertex_ids = samples.vertex_ids
+        self.tags = samples.tags
+        self.stages = samples.time_stages
         self.set_dtype()
         if not args.use_pretrained_emb:
             self.concact_feats(embedding)
@@ -63,67 +59,62 @@ class DiggDataset(Dataset):
     def __len__(self):
         return self.labels.shape[0]
     def __getitem__(self, index):
-        return self.adjs[index], self.feats[index], self.labels[index], self.vertex_ids[index]
+        return self.adjs[index], self.feats[index], self.labels[index], self.vertex_ids[index], self.tags[index], self.stages[index]
 
-def collate_fn2(batch:list): 
-    """
-    Collate function which to transform scipy coo matrix to pytorch sparse tensor
-    """
-    adjs_batch, vertices_batch, labels_batch, feats_batch = zip(*batch)
-    adjs_batch = torch.FloatTensor(np.array(adjs_batch))
-    vertices_batch = torch.LongTensor(np.array(vertices_batch))
-    
-    if type(labels_batch[0]).__module__ == 'numpy':
-        # NOTE: https://stackoverflow.com/questions/69742930/runtimeerror-nll-loss-forward-reduce-cuda-kernel-2d-index-not-implemented-for
-        labels_batch = torch.LongTensor(labels_batch)
-    
-    if type(feats_batch[0]).__module__ == 'numpy':
-        feats_batch = torch.FloatTensor(np.array(feats_batch))
-    return adjs_batch, feats_batch, labels_batch, vertices_batch
+def gen_user_emb(tot_user_num):
+    # user_feats = [[0.]*200*8*3 for _ in range(tot_user_num)]
+    # for tag in range(200):
+    #     logger.info(f"tag={tag}")
+    #     for stage in range(8):
+    #         for feats_idx, feats in enumerate(["norm_gravity_feature", "norm_exptime_feature1", "norm_ce_feature"]):
+    #             feats = load_pickle(f"/root/data/HeterGAT/user_features/{feats}/hashtag{tag}_t{stage}.p")
+    #             for idx in range(tot_user_num):
+    #                 user_feats[idx][tag*3*8+stage*3+feats_idx] = float(feats[idx])
+    # user_feats = np.array(user_feats)
+    user_feats = load_pickle("/root/data/HeterGAT/user_features/user_features.p")
+    return torch.FloatTensor(user_feats)
 
-def digg_load_dataset(args, train_ratio=60, valid_ratio=20, batch_size=256):
+def digg_load_dataset(args):
     data_dirpath = args.file_dir
-    # embedding_path = "/root/data/TR/DeepInf-4dataset/digg/deepwalk.emb_64"
     embedding_path = "/root/data/HeterGAT/basic/deepwalk/deepwalk_added.emb_64"
     vertices = np.load(os.path.join(data_dirpath, "vertex_id.npy"))
     max_vertex_idx = np.max(vertices)
     embedding = load_w2v_feature(embedding_path, max_vertex_idx)
+    user_emb = gen_user_emb(max(max_vertex_idx, 208894))
 
     samples = SubGraphSample(
         adj_matrices=np.load(os.path.join(data_dirpath, "adjacency_matrix.npy")),
         influence_features=np.load(os.path.join(data_dirpath, "influence_feature.npy")),
         vertex_ids=np.load(os.path.join(data_dirpath, "vertex_id.npy")),
-        labels=np.load(os.path.join(data_dirpath, "label.npy"))
+        labels=np.load(os.path.join(data_dirpath, "label.npy")),
+        tags=np.load(os.path.join(data_dirpath, "hashtag.npy")),
+        time_stages=np.load(os.path.join(data_dirpath, "stage.npy"))
     )
     dataset = DiggDataset(samples, embedding, args)
     nb_classes = 2
     class_weight = torch.FloatTensor(len(dataset) / (nb_classes*np.bincount(samples.labels))) if args.class_weight_balanced else torch.ones(nb_classes)
     feature_dim = dataset.get_feature_dim()
     
-    return dataset, embedding, class_weight, feature_dim, nb_classes
+    return dataset, embedding, user_emb, class_weight, feature_dim, nb_classes
 
 args = init_args()
-GPU_MODEL = args.gpu
-dataset, embedding, class_weight, feature_dim, nb_classes = digg_load_dataset(args)
+dataset, embedding, user_emb, class_weight, feature_dim, nb_classes = digg_load_dataset(args)
 N = len(dataset)
-logger.info(f"len={N}")
 n_units = [feature_dim]+[int(x) for x in args.hidden_units.strip().split(",")]+[nb_classes]
 n_heads = [int(x) for x in args.heads.strip().split(",")]+[1]
-logger.info("class_weight=%.2f:%.2f", class_weight[0], class_weight[1])
-logger.info("feature dimension=%d", feature_dim)
-logger.info("number of classes=%d", nb_classes)
+logger.info(f"Preparing Args... samples={N}, class_weight={class_weight[0]:.2f}:{class_weight[1]:.2f}, feature_dim={feature_dim}, nb_classes={nb_classes}, n_units={n_units}, n_heads={n_heads}")
+logger.info(f"pretrained_emb size={embedding.shape}, user_emb size={user_emb.size()}")
 
 train_start,  valid_start, test_start = 0, int(N * args.train_ratio / 100), int(N * (args.train_ratio + args.valid_ratio) / 100)
 train_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(valid_start - train_start, 0))
 valid_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(test_start - valid_start, valid_start))
 test_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(N - test_start, test_start))
-logger.info(f"Finish Loading Dataset... train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
+logger.info(f"Loading Dataset... train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
 
-# model = HeterGraphAttentionNetwork(n_user=50, n_units=n_units, n_heads=n_heads, dropout=args.dropout)
 if args.use_pretrained_emb:
     model = HeterdenseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, dropout=args.dropout)
-else:
-    model = BatchGAT2(n_units=n_units, n_heads=n_heads, dropout=args.dropout)
+# else:
+#     model = BatchGAT2(n_units=n_units, n_heads=n_heads, dropout=args.dropout)
 
 if args.cuda:
     model.to(args.gpu)
@@ -137,7 +128,7 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
     loss, prec, rec, f1 = 0., 0., 0., 0.
     y_true, y_pred, y_score = [], [], []
     for i_batch, batch in enumerate(loader):
-        graph, features, labels, vertices = batch
+        graph, features, labels, vertices, tags, stages = batch
         bs = graph.size(0)
 
         if args.cuda:
@@ -148,7 +139,11 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
         if not args.use_pretrained_emb:
             output = model(features, graph)
         else:
-            output = model(features, vertices, [graph, graph])
+            user_feats = torch.stack([
+                user_emb[:,tags*8*3+stages*3+idx].T.to(args.gpu).gather(dim=1, index=vertices)
+            for idx in range(3)], dim=2)
+            user_feats = user_feats.to(args.gpu)
+            output = model(features, user_feats, vertices, [graph, graph])
         if args.model == "gcn" or args.model == "gat":
             output = output[:, -1, :]
         loss_batch = F.nll_loss(output, labels, class_weight)
@@ -197,7 +192,7 @@ def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
     loss = 0.
     total = 0.
     for i_batch, batch in enumerate(train_loader):
-        graph, features, labels, vertices = batch
+        graph, features, labels, vertices, tags, stages = batch
         bs = graph.size(0)
 
         if args.cuda:
@@ -210,7 +205,12 @@ def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
         if not args.use_pretrained_emb:
             output = model(features, graph)
         else:
-            output = model(features, vertices, [graph, graph])
+            # (N, nf) ->[] (N, bs) ->.T (bs, N) ->gather (bs, n, 1)
+            # nf=200*8*3, N=208894, bs=1024, n=20
+            user_feats = torch.stack([
+                user_emb[:,tags*8*3+stages*3+idx].T.to(args.gpu).gather(dim=1, index=vertices)
+            for idx in range(3)], dim=2)
+            output = model(features, user_feats, vertices, [graph, graph])
         if args.model == "gcn" or args.model == "gat":
             output = output[:, -1, :]
         loss_train = F.nll_loss(output, labels, class_weight)
