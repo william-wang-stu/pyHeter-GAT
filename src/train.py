@@ -6,13 +6,14 @@
 2. 网路
 3. 训练测试
 """
+from random import sample
 import sys
 import os
 
 sys.path.append(os.path.dirname(os.getcwd()))
 from lib.log import logger
 from utils import load_pickle, save_pickle, init_args, ChunkSampler, HeterGraphDataset, sparse_batch_collate
-from model import BatchGAT, HeterGraphAttentionNetwork
+from model import BatchGAT, BatchGAT2, HeterdenseGAT
 import numpy as np
 import time
 import torch
@@ -21,29 +22,48 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from tensorboard_logger import tensorboard_logger
+import shutil
+import argparse
 
 from torch.utils.data import Dataset
 from utils import SubGraphSample, load_w2v_feature
+import sklearn
+from sklearn import preprocessing
 
 class DiggDataset(Dataset):
-    def __init__(self, samples: SubGraphSample, embedding) -> None:
+    def __init__(self, samples: SubGraphSample, embedding, args) -> None:
         super().__init__()
         self.adjs = samples.adj_matrices
         self.labels = samples.labels
         self.feats = samples.influence_features
         self.vertex_ids = samples.vertex_ids
-        self.concact_feats(embedding)
+        self.set_dtype()
+        if not args.use_pretrained_emb:
+            self.concact_feats(embedding)
+        self.extend_graph()
+    def extend_graph(self):
+        # self-loop trick, the input graphs should have no self-loop
+        identity = np.identity(self.adjs.shape[1])
+        self.adjs += identity
+        self.adjs[self.adjs != 0] = 1.0
+        self.adjs = self.adjs.astype(np.dtype('B'))
     def concact_feats(self, embedding):
         feats = []
         for idx, vertex_ids in enumerate(self.vertex_ids):
             emb_feats = [embedding[user] for user in vertex_ids]
             feats.append(np.concatenate((self.feats[idx], emb_feats), axis=1))
         self.feats = np.array(feats)
-        logger.info(self.feats.shape)
+    def set_dtype(self):
+        self.adjs  = np.float64(self.adjs)
+        self.feats = np.float32(self.feats)
+    def get_user_num(self):
+        return self.feats.shape[1]
+    def get_feature_dim(self):
+        return self.feats.shape[2]
     def __len__(self):
         return self.labels.shape[0]
     def __getitem__(self, index):
-        return self.adjs[index], self.vertex_ids[index], self.labels[index], self.feats[index]
+        return self.adjs[index], self.feats[index], self.labels[index], self.vertex_ids[index]
 
 def collate_fn2(batch:list): 
     """
@@ -59,68 +79,56 @@ def collate_fn2(batch:list):
     
     if type(feats_batch[0]).__module__ == 'numpy':
         feats_batch = torch.FloatTensor(np.array(feats_batch))
-    return adjs_batch, vertices_batch, labels_batch, feats_batch
+    return adjs_batch, feats_batch, labels_batch, vertices_batch
 
-def digg_load_dataset(train_ratio=60, valid_ratio=20, batch_size=256):
-    embedding_path = "/root/Lab_Related/data/Heter-GAT/Classic/deepwalk/deepwalk_added.emb_64"
-    vertices = np.load("/root/TR-pptusn/DeepInf-preprocess/preprocess/stages_op_inf_100_1k/vertex_id.npy")
+def digg_load_dataset(args, train_ratio=60, valid_ratio=20, batch_size=256):
+    data_dirpath = args.file_dir
+    # embedding_path = "/root/data/TR/DeepInf-4dataset/digg/deepwalk.emb_64"
+    embedding_path = "/root/data/HeterGAT/basic/deepwalk/deepwalk_added.emb_64"
+    vertices = np.load(os.path.join(data_dirpath, "vertex_id.npy"))
     max_vertex_idx = np.max(vertices)
     embedding = load_w2v_feature(embedding_path, max_vertex_idx)
-    # embedding = torch.FloatTensor(embedding)
 
     samples = SubGraphSample(
-        adj_matrices=np.load("/root/TR-pptusn/DeepInf-preprocess/preprocess/stages_op_inf_100_1k/adjacency_matrix.npy"),
-        influence_features=np.load("/root/TR-pptusn/DeepInf-preprocess/preprocess/stages_op_inf_100_1k/influence_feature.npy"),
-        vertex_ids=np.load("/root/TR-pptusn/DeepInf-preprocess/preprocess/stages_op_inf_100_1k/vertex_id.npy"),
-        labels=np.load("/root/TR-pptusn/DeepInf-preprocess/preprocess/stages_op_inf_100_1k/label.npy")
+        adj_matrices=np.load(os.path.join(data_dirpath, "adjacency_matrix.npy")),
+        influence_features=np.load(os.path.join(data_dirpath, "influence_feature.npy")),
+        vertex_ids=np.load(os.path.join(data_dirpath, "vertex_id.npy")),
+        labels=np.load(os.path.join(data_dirpath, "label.npy"))
     )
-    dataset = DiggDataset(samples, embedding)
-    nb_samples    = len(dataset)
+    dataset = DiggDataset(samples, embedding, args)
+    nb_classes = 2
+    class_weight = torch.FloatTensor(len(dataset) / (nb_classes*np.bincount(samples.labels))) if args.class_weight_balanced else torch.ones(nb_classes)
+    feature_dim = dataset.get_feature_dim()
     
-    train_start,  valid_start, test_start = 0, int(nb_samples*train_ratio/100), int(nb_samples*(train_ratio+valid_ratio)/100)
-    train_loader = DataLoader(dataset, batch_size=batch_size, sampler=ChunkSampler(valid_start-train_start, 0), collate_fn=collate_fn2)
-    valid_loader = DataLoader(dataset, batch_size=batch_size, sampler=ChunkSampler(test_start-valid_start, valid_start), collate_fn=collate_fn2)
-    test_loader  = DataLoader(dataset, batch_size=batch_size, sampler=ChunkSampler(nb_samples - test_start, test_start), collate_fn=collate_fn2)
-    logger.info(f"Finish Loading Dataset... train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
-
-    return samples, embedding, train_loader, valid_loader, test_loader
-
-# 1. 
-def load_dataset(data_filepath:str, train_ratio:float, valid_ratio:float, batch_size:int):
-    # heter_samples = load_pickle(os.path.join(data_dirpath, "heter_samples_tensor.p"))
-    heter_samples = load_pickle(data_filepath)
-    dataset       = HeterGraphDataset(heter_samples=heter_samples)
-    nb_samples    = len(dataset)
-    
-    train_start,  valid_start, test_start = 0, int(nb_samples*train_ratio/100), int(nb_samples*(train_ratio+valid_ratio)/100)
-    train_loader = DataLoader(dataset, batch_size=batch_size, sampler=ChunkSampler(valid_start-train_start, 0), collate_fn=sparse_batch_collate)
-    valid_loader = DataLoader(dataset, batch_size=batch_size, sampler=ChunkSampler(test_start-valid_start, valid_start), collate_fn=sparse_batch_collate)
-    test_loader  = DataLoader(dataset, batch_size=batch_size, sampler=ChunkSampler(nb_samples - test_start, test_start), collate_fn=sparse_batch_collate)
-    logger.info(f"Finish Loading Dataset... train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
-
-    return heter_samples, train_loader, valid_loader, test_loader
+    return dataset, embedding, class_weight, feature_dim, nb_classes
 
 args = init_args()
 GPU_MODEL = args.gpu
-# heter_samples, train_loader, valid_loader, test_loader = load_dataset(args.file_dir, args.train_ratio, args.valid_ratio, args.batch)
-heter_samples, embedding, train_loader, valid_loader, test_loader = digg_load_dataset()
-nb_samples = len(heter_samples)
-nb_classes = 2
-class_weight = torch.FloatTensor(nb_samples / (nb_classes*np.bincount(heter_samples.labels))) if args.class_weight_balanced else torch.ones(nb_classes)
-nb_user = 50
-# n_units = [heter_samples.initial_features.shape[2]]+[int(x) for x in args.hidden_units.strip().split(",")]
-n_units = [heter_samples.influence_features.shape[2]+64]+[int(x) for x in args.hidden_units.strip().split(",")]
-n_heads = [int(x) for x in args.heads.strip().split(",")]
+dataset, embedding, class_weight, feature_dim, nb_classes = digg_load_dataset(args)
+N = len(dataset)
+logger.info(f"len={N}")
+n_units = [feature_dim]+[int(x) for x in args.hidden_units.strip().split(",")]+[nb_classes]
+n_heads = [int(x) for x in args.heads.strip().split(",")]+[1]
+logger.info("class_weight=%.2f:%.2f", class_weight[0], class_weight[1])
+logger.info("feature dimension=%d", feature_dim)
+logger.info("number of classes=%d", nb_classes)
 
-# 2. 
-# model = HeterGraphAttentionNetwork(n_user=nb_user, n_units=n_units, nb_classes=nb_classes, n_heads=n_heads, dropout=args.dropout)
-model = BatchGAT(pretrained_emb=torch.FloatTensor(embedding), n_units=n_units, n_heads=n_heads, dropout=args.dropout)
+train_start,  valid_start, test_start = 0, int(N * args.train_ratio / 100), int(N * (args.train_ratio + args.valid_ratio) / 100)
+train_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(valid_start - train_start, 0))
+valid_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(test_start - valid_start, valid_start))
+test_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(N - test_start, test_start))
+logger.info(f"Finish Loading Dataset... train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
+
+# model = HeterGraphAttentionNetwork(n_user=50, n_units=n_units, n_heads=n_heads, dropout=args.dropout)
+if args.use_pretrained_emb:
+    model = HeterdenseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, dropout=args.dropout)
+else:
+    model = BatchGAT2(n_units=n_units, n_heads=n_heads, dropout=args.dropout)
+
 if args.cuda:
-    # model.to(GPU_MODEL)
-    model.to(GPU_MODEL)
-    # class_weight = class_weight.to(GPU_MODEL)
-    class_weight = class_weight.to(GPU_MODEL)
-# params = [{'params': model.parameters()}]
+    model.to(args.gpu)
+    class_weight = class_weight.to(args.gpu)
+
 optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
@@ -129,27 +137,24 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
     loss, prec, rec, f1 = 0., 0., 0., 0.
     y_true, y_pred, y_score = [], [], []
     for i_batch, batch in enumerate(loader):
-        # uu_adjs, ut_adjs, labels, feats = batch
-        # # NOTE: https://stackoverflow.com/questions/69742930/runtimeerror-nll-loss-forward-reduce-cuda-kernel-2d-index-not-implemented-for
-        # bs = uu_adjs.size(0)
-        # if args.cuda:
-        #     uu_adjs, ut_adjs, labels, feats = uu_adjs.to(GPU_MODEL), ut_adjs.to(GPU_MODEL), labels.to(GPU_MODEL), feats.to(GPU_MODEL)
+        graph, features, labels, vertices = batch
+        bs = graph.size(0)
 
-        adjs, vertices, labels, feats = batch
-        bs = adjs.size(0)
         if args.cuda:
-            adjs, vertices, labels, feats = adjs.to(GPU_MODEL), vertices.to(GPU_MODEL), labels.to(GPU_MODEL), feats.to(GPU_MODEL)
-
-        # output = model(feats, torch.stack([uu_adjs, ut_adjs]))
-        # output = model(feats, torch.stack([adjs, adjs]))
-        output = model(feats, vertices, adjs)
-        output = output[:,-1,:] # choose last user
-
+            features = features.to(args.gpu)
+            graph = graph.to(args.gpu)
+            labels = labels.to(args.gpu)
+            vertices = vertices.to(args.gpu)
+        if not args.use_pretrained_emb:
+            output = model(features, graph)
+        else:
+            output = model(features, vertices, [graph, graph])
+        if args.model == "gcn" or args.model == "gat":
+            output = output[:, -1, :]
         loss_batch = F.nll_loss(output, labels, class_weight)
         loss += bs * loss_batch.item()
 
         y_true += labels.data.tolist()
-        # 返回output中每行最大值的索引
         y_pred += output.max(1)[1].data.tolist()
         y_score += output[:, 1].data.tolist()
         total += bs
@@ -166,6 +171,7 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
     auc = roc_auc_score(y_true, y_score)
     logger.info("%sloss: %.4f AUC: %.4f Prec: %.4f Rec: %.4f F1: %.4f",
             log_desc, loss / total, auc, prec, rec, f1)
+
     tensorboard_logger.log_value(log_desc + 'loss', loss / total, epoch + 1)
     tensorboard_logger.log_value(log_desc + 'auc', auc, epoch + 1)
     tensorboard_logger.log_value(log_desc + 'prec', prec, epoch + 1)
@@ -184,44 +190,43 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
     else:
         return None
 
+
 def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
     model.train()
 
     loss = 0.
     total = 0.
     for i_batch, batch in enumerate(train_loader):
-        # uu_adjs, ut_adjs, labels, feats = batch
-        # bs = uu_adjs.size(0)
-        # if args.cuda:
-        #     uu_adjs, ut_adjs, labels, feats = uu_adjs.to(GPU_MODEL), ut_adjs.to(GPU_MODEL), labels.to(GPU_MODEL), feats.to(GPU_MODEL)
+        graph, features, labels, vertices = batch
+        bs = graph.size(0)
 
-        adjs, vertices, labels, feats = batch
-        bs = adjs.size(0)
         if args.cuda:
-            adjs, vertices, labels, feats = adjs.to(GPU_MODEL), vertices.to(GPU_MODEL), labels.to(GPU_MODEL), feats.to(GPU_MODEL)
+            features = features.to(args.gpu)
+            graph = graph.to(args.gpu)
+            labels = labels.to(args.gpu)
+            vertices = vertices.to(args.gpu)
 
         optimizer.zero_grad()
-        # output = model(torch.rand((feats.shape)).to(GPU_MODEL), torch.stack([uu_adjs, ut_adjs]))
-        # output = model(feats, torch.stack([uu_adjs, ut_adjs]))
-        # output = model(feats, torch.stack([adjs, adjs]))
-        output = model(feats, vertices, adjs)
-        output = output[:,-1,:] # choose last user
-
+        if not args.use_pretrained_emb:
+            output = model(features, graph)
+        else:
+            output = model(features, vertices, [graph, graph])
+        if args.model == "gcn" or args.model == "gat":
+            output = output[:, -1, :]
         loss_train = F.nll_loss(output, labels, class_weight)
         loss += bs * loss_train.item()
         total += bs
         loss_train.backward()
         optimizer.step()
     logger.info("train loss in this epoch %f", loss / total)
-    # logger.info(f"GPU Mem Usage: {torch.cuda.memory_reserved(int(GPU_MODEL[-1]))/1024**3}")
     tensorboard_logger.log_value('train_loss', loss / total, epoch + 1)
     if (epoch + 1) % args.check_point == 0:
         logger.info("epoch %d, checkpoint!", epoch)
         best_thr = evaluate(epoch, valid_loader, return_best_thr=True, log_desc='valid_')
         evaluate(epoch, test_loader, thr=best_thr, log_desc='test_')
 
-# 3. 
-# Training
+
+# Train model
 t_total = time.time()
 logger.info("training...")
 for epoch in range(args.epochs):

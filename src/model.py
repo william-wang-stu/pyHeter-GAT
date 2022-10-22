@@ -307,19 +307,14 @@ class HeterGraphAttentionNetwork(nn.Module):
         ) #  (bs, Nu, nb_classes)
         return F.log_softmax(ret, dim=-1)
 
-class HeterGAT1(nn.Module):
+class HeterdenseGAT(nn.Module):
     def __init__(
-        self, n_user, pretrained_emb,  nb_node_kinds=2, nb_loop_nodes=[50,1050],
+        self, n_user, pretrained_emb,  nb_node_kinds=2,
         nb_classes=2, n_units=[25,64], n_heads=[3],
         attn_dropout=0.5, dropout=0.1, 
         fine_tune=False, instance_normalization=True,
         d2=64, gpu_device_ids=[] 
     ) -> None:
-        """
-        Args:
-            gpu_device_ids(List[int], default=[]): 采用Model Parallel方法, 主要使多头注意力可以在不同GPU上运行, 
-                模型以数据所属GPU为例, 先在该参数指定的不同GPU上执行单一注意力头, 再在最后将所有注意力头的运行结果复制回数据所属的主GPU上
-        """
         super().__init__()
 
         self.n_layer = len(n_units) - 2
@@ -334,7 +329,7 @@ class HeterGAT1(nn.Module):
         self.embedding = nn.Embedding(pretrained_emb.size(0), pretrained_emb.size(1))
         self.embedding.weight = nn.Parameter(pretrained_emb)
         self.embedding.weight.requires_grad = fine_tune
-        # n_units[0] += pretrained_emb.size(1)
+        n_units[0] += pretrained_emb.size(1)
 
         self.d = n_units[0]
         self.d1 = n_units[1]
@@ -342,14 +337,11 @@ class HeterGAT1(nn.Module):
         self.n_user = n_user
 
         self.layer_stack = nn.ModuleList()
-        for hidx in range(nb_node_kinds):
+        for _ in range(nb_node_kinds):
             layer_stack = nn.ModuleList()
             for i in range(self.n_layer):
-                # consider multi head from last layer
                 f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
                 layer_stack.append(
-                    # BatchSparseMultiHeadGraphAttention(nb_heads=n_heads[i], nb_in_feats=f_in, nb_out_feats=n_units[i + 1], 
-                    #     nb_loop_nodes=nb_loop_nodes[hidx], attn_dropout=attn_dropout)
                     BatchMultiHeadGraphAttention(n_head=n_heads[i], f_in=f_in, f_out=n_units[i+1], attn_dropout=attn_dropout)
                 )
             self.layer_stack.append(layer_stack)
@@ -357,21 +349,16 @@ class HeterGAT1(nn.Module):
         self.fc_layer = nn.Linear(in_features=self.d1*(nb_node_kinds+1), out_features=nb_classes)
     
     def forward(self, h, vertices, hadj):
-        # NOTE: h: (bs, N, fin), hadj: (|Rs|, bs, N, N)
-        # TODO: 用异质图sample时这里包括下面的inst_norm都检查下
-        # logger.info(f"{h.shape}, {hadj[0].shape}")
-        # emb = self.embedding(vertices)
-        # if self.inst_norm:
-        #     emb = self.norm(emb.transpose(1, 2)).transpose(1, 2)
-        # h = torch.cat((h, emb), dim=2)
+        # NOTE: h: (bs, n, fin), vertices: (bs, n), hadj: (|Rs|, bs, n, n)
+        emb = self.embedding(vertices)
+        if self.inst_norm:
+            emb = self.norm(emb.transpose(1, 2)).transpose(1, 2)
+        h = torch.cat((h, emb), dim=2)
         bs, n = h.shape[:2]
         heter_embs = []
         for heter_idx, layer_stack in enumerate(self.layer_stack):
-            # x = copy.deepcopy(h)
-            # TODO:
             x = h
             for i, gat_layer in enumerate(layer_stack):
-                # logger.info(f"i={i}, x={x.shape}, hadj={hadj[heter_idx].shape}")
                 x = gat_layer(x, hadj[heter_idx]) # output: (bs, n_head, n, f_out)
                 if i + 1 == self.n_layer:
                     x = x.mean(dim=-3) # (bs, n_head, n, f_out) -> (bs, n, f_out)
