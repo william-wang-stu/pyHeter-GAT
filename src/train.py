@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.getcwd()))
 
 from lib.log import logger
 from utils import load_pickle, save_pickle, init_args, ChunkSampler, sparse_batch_collate
-from model import BatchGAT, BatchGAT2, HeterdenseGAT
+from model import BatchGAT, BatchGAT2, HeterdenseGAT, DenseGAT
 import numpy as np
 import time
 import torch
@@ -112,11 +112,13 @@ test_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(N 
 logger.info(f"Loading Dataset... train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
 
 if args.use_pretrained_emb:
-    model = HeterdenseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, dropout=args.dropout)
+    # model = HeterdenseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, dropout=args.dropout)
+    model = DenseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), n_units=n_units, n_heads=n_heads, dropout=args.dropout)
 # else:
 #     model = BatchGAT2(n_units=n_units, n_heads=n_heads, dropout=args.dropout)
 
 if args.cuda:
+    user_emb = user_emb.to(args.gpu)
     model.to(args.gpu)
     class_weight = class_weight.to(args.gpu)
 
@@ -136,14 +138,16 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
             graph = graph.to(args.gpu)
             labels = labels.to(args.gpu)
             vertices = vertices.to(args.gpu)
+            tags, stages = tags.to(args.gpu), stages.to(args.gpu)
         if not args.use_pretrained_emb:
             output = model(features, graph)
         else:
             user_feats = torch.stack([
-                user_emb[:,tags*8*3+stages*3+idx].T.to(args.gpu).gather(dim=1, index=vertices)
+                user_emb[:,tags*8*3+stages*3+idx].T.gather(dim=1, index=vertices)
             for idx in range(3)], dim=2)
             user_feats = user_feats.to(args.gpu)
-            output = model(features, user_feats, vertices, [graph, graph])
+            # output = model(features, user_feats, vertices, [graph, graph])
+            output = model(features, user_feats, vertices, graph)
         if args.model == "gcn" or args.model == "gat":
             output = output[:, -1, :]
         loss_batch = F.nll_loss(output, labels, class_weight)
@@ -200,7 +204,7 @@ def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
             graph = graph.to(args.gpu)
             labels = labels.to(args.gpu)
             vertices = vertices.to(args.gpu)
-
+            tags, stages = tags.to(args.gpu), stages.to(args.gpu)
         optimizer.zero_grad()
         if not args.use_pretrained_emb:
             output = model(features, graph)
@@ -208,9 +212,10 @@ def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
             # (N, nf) ->[] (N, bs) ->.T (bs, N) ->gather (bs, n, 1)
             # nf=200*8*3, N=208894, bs=1024, n=20
             user_feats = torch.stack([
-                user_emb[:,tags*8*3+stages*3+idx].T.to(args.gpu).gather(dim=1, index=vertices)
+                user_emb[:,tags*8*3+stages*3+idx].T.gather(dim=1, index=vertices)
             for idx in range(3)], dim=2)
-            output = model(features, user_feats, vertices, [graph, graph])
+            # output = model(features, user_feats, vertices, [graph, graph])
+            output = model(features, user_feats, vertices, graph)
         if args.model == "gcn" or args.model == "gat":
             output = output[:, -1, :]
         loss_train = F.nll_loss(output, labels, class_weight)
