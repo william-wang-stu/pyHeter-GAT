@@ -11,8 +11,8 @@ import os
 sys.path.append(os.path.dirname(os.getcwd()))
 
 from lib.log import logger
-from utils import load_pickle, save_pickle, init_args, ChunkSampler, sparse_batch_collate
-from model import BatchGAT, BatchGAT2, HeterdenseGAT, DenseGAT
+from utils import load_pickle, save_pickle, init_args, ChunkSampler, SubGraphSample, load_w2v_feature
+from model import BatchdenseGAT, HeterdenseGAT
 import numpy as np
 import time
 import torch
@@ -22,7 +22,12 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from tensorboard_logger import tensorboard_logger
 from torch.utils.data import Dataset
-from utils import SubGraphSample, load_w2v_feature
+import configparser
+
+config = configparser.ConfigParser()
+config.read('config.ini')
+DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
+logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}")
 
 class DiggDataset(Dataset):
     def __init__(self, samples: SubGraphSample, embedding, args) -> None:
@@ -34,8 +39,8 @@ class DiggDataset(Dataset):
         self.tags = samples.tags
         self.stages = samples.time_stages
         self.set_dtype()
-        if not args.use_pretrained_emb:
-            self.concact_feats(embedding)
+        # if not args.use_pretrained_emb:
+        #     self.concact_feats(embedding)
         self.extend_graph()
     def extend_graph(self):
         # self-loop trick, the input graphs should have no self-loop
@@ -71,12 +76,12 @@ def gen_user_emb(tot_user_num):
     #             for idx in range(tot_user_num):
     #                 user_feats[idx][tag*3*8+stage*3+feats_idx] = float(feats[idx])
     # user_feats = np.array(user_feats)
-    user_feats = load_pickle("/root/data/HeterGAT/user_features/user_features.p")
+    user_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features.p"))
     return torch.FloatTensor(user_feats)
 
 def digg_load_dataset(args):
-    data_dirpath = args.file_dir
-    embedding_path = "/root/data/HeterGAT/basic/deepwalk/deepwalk_added.emb_64"
+    data_dirpath = os.path.join(DATA_ROOTPATH, args.file_dir)
+    embedding_path = os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64")
     vertices = np.load(os.path.join(data_dirpath, "vertex_id.npy"))
     max_vertex_idx = np.max(vertices)
     embedding = load_w2v_feature(embedding_path, max_vertex_idx)
@@ -111,11 +116,14 @@ valid_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(t
 test_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(N - test_start, test_start))
 logger.info(f"Loading Dataset... train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
 
-if args.use_pretrained_emb:
-    # model = HeterdenseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, dropout=args.dropout)
-    model = DenseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), n_units=n_units, n_heads=n_heads, dropout=args.dropout)
-# else:
-#     model = BatchGAT2(n_units=n_units, n_heads=n_heads, dropout=args.dropout)
+if args.model == 'batchdensegat':
+    model = BatchdenseGAT(pretrained_emb=torch.FloatTensor(embedding), n_units=n_units, n_heads=n_heads, 
+        attn_dropout=args.attn_dropout, dropout=args.dropout, use_user_emb=args.use_user_emb)
+elif args.model == 'heterdensegat':
+    model = HeterdenseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), 
+        nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, 
+        attn_dropout=args.attn_dropout, dropout=args.dropout, use_user_emb=args.use_user_emb)
+logger.info(f"model: {model}")
 
 if args.cuda:
     user_emb = user_emb.to(args.gpu)
@@ -134,21 +142,21 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
         bs = graph.size(0)
 
         if args.cuda:
-            features = features.to(args.gpu)
-            graph = graph.to(args.gpu)
-            labels = labels.to(args.gpu)
-            vertices = vertices.to(args.gpu)
-            tags, stages = tags.to(args.gpu), stages.to(args.gpu)
-        if not args.use_pretrained_emb:
-            output = model(features, graph)
-        else:
+            features, graph, labels, vertices, tags, stages = features.to(args.gpu), graph.to(args.gpu), labels.to(args.gpu), vertices.to(args.gpu), tags.to(args.gpu), stages.to(args.gpu)
+        
+        if args.use_user_emb:
             user_feats = torch.stack([
                 user_emb[:,tags*8*3+stages*3+idx].T.gather(dim=1, index=vertices)
             for idx in range(3)], dim=2)
             user_feats = user_feats.to(args.gpu)
-            # output = model(features, user_feats, vertices, [graph, graph])
-            output = model(features, user_feats, vertices, graph)
-        if args.model == "gcn" or args.model == "gat":
+        else:
+            user_feats = None
+        
+        if args.model == 'batchdensegat':
+            output = model(vertices, graph, features, user_feats)
+        elif args.model == 'heterdensegat':
+            output = model(vertices, [graph, graph], features, user_feats)
+        if args.model[-3:] == "gat":
             output = output[:, -1, :]
         loss_batch = F.nll_loss(output, labels, class_weight)
         loss += bs * loss_batch.item()
@@ -200,23 +208,22 @@ def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
         bs = graph.size(0)
 
         if args.cuda:
-            features = features.to(args.gpu)
-            graph = graph.to(args.gpu)
-            labels = labels.to(args.gpu)
-            vertices = vertices.to(args.gpu)
-            tags, stages = tags.to(args.gpu), stages.to(args.gpu)
+            features, graph, labels, vertices, tags, stages = features.to(args.gpu), graph.to(args.gpu), labels.to(args.gpu), vertices.to(args.gpu), tags.to(args.gpu), stages.to(args.gpu)
+        
         optimizer.zero_grad()
-        if not args.use_pretrained_emb:
-            output = model(features, graph)
-        else:
-            # (N, nf) ->[] (N, bs) ->.T (bs, N) ->gather (bs, n, 1)
-            # nf=200*8*3, N=208894, bs=1024, n=20
+        if args.use_user_emb:
             user_feats = torch.stack([
                 user_emb[:,tags*8*3+stages*3+idx].T.gather(dim=1, index=vertices)
             for idx in range(3)], dim=2)
-            # output = model(features, user_feats, vertices, [graph, graph])
-            output = model(features, user_feats, vertices, graph)
-        if args.model == "gcn" or args.model == "gat":
+            user_feats = user_feats.to(args.gpu)
+        else:
+            user_feats = None
+        
+        if args.model == 'batchdensegat':
+            output = model(vertices, graph, features, user_feats)
+        elif args.model == 'heterdensegat':
+            output = model(vertices, [graph, graph], features, user_feats)
+        if args.model[-3:] == "gat":
             output = output[:, -1, :]
         loss_train = F.nll_loss(output, labels, class_weight)
         loss += bs * loss_train.item()

@@ -5,3 +5,4 @@ nohup.out
 *.sh
 *.pkl
 *.p
+*.ini

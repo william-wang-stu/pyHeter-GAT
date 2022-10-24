@@ -307,31 +307,90 @@ class HeterGraphAttentionNetwork(nn.Module):
         ) #  (bs, Nu, nb_classes)
         return F.log_softmax(ret, dim=-1)
 
-class HeterdenseGAT(nn.Module):
+class BatchdenseGAT(nn.Module):
     def __init__(
-        self, n_user, pretrained_emb,
-        nb_node_kinds=2, nb_classes=2, n_units=[25,64], n_heads=[3],
+        self, pretrained_emb,
+        n_units=[25,64], n_heads=[3],
         attn_dropout=0.5, dropout=0.1, 
-        fine_tune=False, instance_normalization=True,
-        d2=64, gpu_device_ids=[] 
+        fine_tune=False, instance_normalization=True, use_user_emb=True,
     ) -> None:
         super().__init__()
 
-        self.n_layer = len(n_units) - 2
+        self.n_layer = len(n_units) - 1
         self.dropout = dropout
-        self.gpu_device_ids = gpu_device_ids
 
         self.inst_norm = instance_normalization
         if self.inst_norm:
             self.norm1 = nn.InstanceNorm1d(pretrained_emb.size(1), momentum=0.0, affine=True)
-            self.norm2 = nn.InstanceNorm1d(3, momentum=0.0, affine=True)
         
         # https://discuss.pytorch.org/t/can-we-use-pre-trained-word-embeddings-for-weight-initialization-in-nn-embedding/1222/2
         self.embedding = nn.Embedding(pretrained_emb.size(0), pretrained_emb.size(1))
         self.embedding.weight = nn.Parameter(pretrained_emb)
         self.embedding.weight.requires_grad = fine_tune
         n_units[0] += pretrained_emb.size(1)
-        n_units[0] += 3 # user_feats
+
+        self.use_user_emb = use_user_emb
+        if self.use_user_emb:
+            n_units[0] += 3 # user_feats
+            if self.inst_norm:
+                self.norm2 = nn.InstanceNorm1d(3, momentum=0.0, affine=True)
+
+        self.layer_stack = nn.ModuleList()
+        for i in range(self.n_layer):
+            # consider multi head from last layer
+            f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
+            self.layer_stack.append(
+                    BatchMultiHeadGraphAttention(n_heads[i], f_in=f_in,
+                        f_out=n_units[i + 1], attn_dropout=attn_dropout)
+                    )
+    
+    def forward(self, vertices, adj, h, user_emb=None):
+        emb = self.embedding(vertices)
+        if self.inst_norm:
+            emb = self.norm1(emb.transpose(1, 2)).transpose(1, 2)
+        h = torch.cat((h, emb), dim=2)
+        if self.use_user_emb:
+            if self.inst_norm:
+                user_emb = self.norm2(user_emb.transpose(1,2)).transpose(1, 2)
+            h = torch.cat((h, user_emb), dim=2)
+
+        bs, n = adj.size()[:2]
+        for i, gat_layer in enumerate(self.layer_stack):
+            h = gat_layer(h, adj) # bs x n_head x n x f_out
+            if i + 1 == self.n_layer:
+                h = h.mean(dim=1)
+            else:
+                h = F.elu(h.transpose(1, 2).contiguous().view(bs, n, -1))
+                h = F.dropout(h, self.dropout, training=self.training)
+        return F.log_softmax(h, dim=-1)
+
+class HeterdenseGAT(nn.Module):
+    def __init__(
+        self, n_user, pretrained_emb,
+        nb_node_kinds=2, nb_classes=2, n_units=[25,64], n_heads=[3], d2=64,
+        attn_dropout=0.5, dropout=0.1, 
+        fine_tune=False, instance_normalization=True, use_user_emb=True,
+    ) -> None:
+        super().__init__()
+
+        self.n_layer = len(n_units) - 2
+        self.dropout = dropout
+
+        self.inst_norm = instance_normalization
+        if self.inst_norm:
+            self.norm1 = nn.InstanceNorm1d(pretrained_emb.size(1), momentum=0.0, affine=True)
+        
+        # https://discuss.pytorch.org/t/can-we-use-pre-trained-word-embeddings-for-weight-initialization-in-nn-embedding/1222/2
+        self.embedding = nn.Embedding(pretrained_emb.size(0), pretrained_emb.size(1))
+        self.embedding.weight = nn.Parameter(pretrained_emb)
+        self.embedding.weight.requires_grad = fine_tune
+        n_units[0] += pretrained_emb.size(1)
+
+        self.use_user_emb = use_user_emb
+        if self.use_user_emb:
+            n_units[0] += 3 # user_feats
+            if self.inst_norm:
+                self.norm2 = nn.InstanceNorm1d(3, momentum=0.0, affine=True)
 
         self.d = n_units[0]
         self.d1 = n_units[1]
@@ -350,13 +409,17 @@ class HeterdenseGAT(nn.Module):
         self.additive_attention = BatchAdditiveAttention(d=self.d, d1=self.d1, d2=self.d2)
         self.fc_layer = nn.Linear(in_features=self.d1*(nb_node_kinds+1), out_features=nb_classes)
     
-    def forward(self, h, user_emb, vertices, hadj):
+    def forward(self, vertices, hadj, h, user_emb=None):
         # NOTE: h: (bs, n, fin), vertices: (bs, n), hadj: (|Rs|, bs, n, n)
         emb = self.embedding(vertices)
         if self.inst_norm:
             emb = self.norm1(emb.transpose(1, 2)).transpose(1, 2)
-            user_emb = self.norm2(user_emb.transpose(1,2)).transpose(1, 2)
-        h = torch.cat((h, user_emb, emb), dim=2)
+        h = torch.cat((h, emb), dim=2)
+        if self.use_user_emb:
+            if self.inst_norm:
+                user_emb = self.norm2(user_emb.transpose(1,2)).transpose(1, 2)
+            h = torch.cat((h, user_emb), dim=2)
+    
         bs, n = h.shape[:2]
         heter_embs = []
         for heter_idx, layer_stack in enumerate(self.layer_stack):
@@ -375,198 +438,3 @@ class HeterdenseGAT(nn.Module):
             torch.cat((type_aware_emb, type_fusion_emb),dim=2).reshape(bs, self.n_user,-1), # (bs, Nu, |Rs|+1, D') -> (bs, Nu, (|Rs|+1)*D')
         ) #  (bs, Nu, nb_classes)
         return F.log_softmax(ret, dim=-1)
-
-class DenseGAT(nn.Module):
-    def __init__(
-        self, n_user, pretrained_emb,
-        n_units=[25,64], n_heads=[3],
-        attn_dropout=0.5, dropout=0.1, 
-        fine_tune=False, instance_normalization=True,
-    ) -> None:
-        super().__init__()
-
-        self.n_layer = len(n_units) - 1
-        self.dropout = dropout
-
-        self.inst_norm = instance_normalization
-        if self.inst_norm:
-            self.norm1 = nn.InstanceNorm1d(pretrained_emb.size(1), momentum=0.0, affine=True)
-            self.norm2 = nn.InstanceNorm1d(3, momentum=0.0, affine=True)
-        
-        # https://discuss.pytorch.org/t/can-we-use-pre-trained-word-embeddings-for-weight-initialization-in-nn-embedding/1222/2
-        self.embedding = nn.Embedding(pretrained_emb.size(0), pretrained_emb.size(1))
-        self.embedding.weight = nn.Parameter(pretrained_emb)
-        self.embedding.weight.requires_grad = fine_tune
-        n_units[0] += pretrained_emb.size(1)
-        # n_units[0] += 3 # user_feats
-
-        self.layer_stack = nn.ModuleList()
-        for i in range(self.n_layer):
-            # consider multi head from last layer
-            f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
-            self.layer_stack.append(
-                    BatchMultiHeadGraphAttention(n_heads[i], f_in=f_in,
-                        f_out=n_units[i + 1], attn_dropout=attn_dropout)
-                    )
-    
-    def forward(self, h, user_emb, vertices, adj):
-        # NOTE: h: (bs, n, fin), vertices: (bs, n), hadj: (|Rs|, bs, n, n)
-        emb = self.embedding(vertices)
-        if self.inst_norm:
-            emb = self.norm1(emb.transpose(1, 2)).transpose(1, 2)
-            user_emb = self.norm2(user_emb.transpose(1,2)).transpose(1, 2)
-        # h = torch.cat((h, user_emb, emb), dim=2)
-        h = torch.cat((h, emb), dim=2)
-        bs, n = adj.size()[:2]
-        for i, gat_layer in enumerate(self.layer_stack):
-            h = gat_layer(h, adj) # bs x n_head x n x f_out
-            if i + 1 == self.n_layer:
-                h = h.mean(dim=1)
-            else:
-                h = F.elu(h.transpose(1, 2).contiguous().view(bs, n, -1))
-                h = F.dropout(h, self.dropout, training=self.training)
-        return F.log_softmax(h, dim=-1)
-
-class HeterGAT2(nn.Module):
-    def __init__(
-        self, n_user, pretrained_emb,  nb_node_kinds=2, nb_loop_nodes=[50,1050],
-        nb_classes=2, n_units=[25,64], n_heads=[3],
-        attn_dropout=0.5, dropout=0.1, 
-        fine_tune=False, instance_normalization=True,
-        d2=64, gpu_device_ids=[] 
-    ) -> None:
-        """
-        Args:
-            gpu_device_ids(List[int], default=[]): 采用Model Parallel方法, 主要使多头注意力可以在不同GPU上运行, 
-                模型以数据所属GPU为例, 先在该参数指定的不同GPU上执行单一注意力头, 再在最后将所有注意力头的运行结果复制回数据所属的主GPU上
-        """
-        super().__init__()
-
-        self.n_layer = len(n_units) - 2
-        self.dropout = dropout
-        self.gpu_device_ids = gpu_device_ids
-
-        self.inst_norm = instance_normalization
-        if self.inst_norm:
-            self.norm = nn.InstanceNorm1d(pretrained_emb.size(1), momentum=0.0, affine=True)
-        
-        # https://discuss.pytorch.org/t/can-we-use-pre-trained-word-embeddings-for-weight-initialization-in-nn-embedding/1222/2
-        self.embedding = nn.Embedding(pretrained_emb.size(0), pretrained_emb.size(1))
-        self.embedding.weight = nn.Parameter(pretrained_emb)
-        self.embedding.weight.requires_grad = fine_tune
-        n_units[0] += pretrained_emb.size(1)
-
-        self.d = n_units[0]
-        self.d1 = n_units[1]
-        self.d2 = n_units[1]
-        self.n_user = n_user
-
-        self.layer_stack = nn.ModuleList()
-        for hidx in range(nb_node_kinds):
-            layer_stack = nn.ModuleList()
-            for i in range(self.n_layer):
-                # consider multi head from last layer
-                f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
-                layer_stack.append(
-                    BatchMultiHeadGraphAttention(n_head=n_heads[i], f_in=f_in, f_out=n_units[i+1], attn_dropout=attn_dropout)
-                )
-            self.layer_stack.append(layer_stack)
-        self.additive_attention = BatchAdditiveAttention(d=self.d, d1=self.d1, d2=self.d2)
-        self.fc_layer = BatchMultiHeadGraphAttention(n_head=1, f_in=self.d1*(1+nb_node_kinds), f_out=nb_classes, attn_dropout=attn_dropout)
-    
-    def forward(self, h, vertices, hadj):
-        # NOTE: h: (bs, N, fin), hadj: (|Rs|, bs, N, N)
-        # TODO: 用异质图sample时这里包括下面的inst_norm都检查下
-        emb = self.embedding(vertices[:self.n_user])
-        if self.inst_norm:
-            emb = self.norm(emb.transpose(1, 2)).transpose(1, 2)
-        # logger.info(f"{h.shape}, {emb.shape}, {vertices.shape}")
-        h = torch.cat((h, emb), dim=2)
-        bs, n = h.shape[:2]
-        heter_embs = []
-        for heter_idx, layer_stack in enumerate(self.layer_stack):
-            x = h
-            for i, gat_layer in enumerate(layer_stack):
-                x = gat_layer(x, hadj[heter_idx]) # output: (bs, n_head, n, f_out)
-                if i + 1 == self.n_layer:
-                    x = x.mean(dim=-3) # (bs, n_head, n, f_out) -> (bs, n, f_out)
-                else:
-                    x = F.elu(x.reshape(bs, n, -1))
-                    x = F.dropout(x, self.dropout, training=self.training)
-            heter_embs.append(x[:,:self.n_user].unsqueeze(-2)) # (bs, Nu, 1, f_out)
-        type_aware_emb = torch.cat(heter_embs, dim=-2) # (bs, Nu, |Rs|, D')
-        type_fusion_emb = self.additive_attention(h[:,:self.n_user], type_aware_emb) # (bs, Nu, 1, D')
-        ret = self.fc_layer(
-            torch.cat((type_aware_emb, type_fusion_emb),dim=2).reshape(bs, self.n_user,-1), # (bs, Nu, |Rs|+1, D') -> (bs, Nu, (|Rs|+1)*D')
-            hadj[0][:,:self.n_user, :self.n_user]
-        ).view(bs, self.n_user, -1) #  (bs, Nu, nb_classes)
-        return F.log_softmax(ret, dim=-1)
-
-class BatchGAT(nn.Module):
-    def __init__(self, pretrained_emb, n_units=[1433, 8, 7], n_heads=[8, 1], dropout=0.1, attn_dropout=0.2, fine_tune=False, instance_normalization=True):
-        super(BatchGAT, self).__init__()
-        self.n_layer = len(n_units) - 1
-        self.dropout = dropout
-        self.inst_norm = instance_normalization
-        if self.inst_norm:
-            self.norm = nn.InstanceNorm1d(pretrained_emb.size(1), momentum=0.0, affine=True)
-        
-        # https://discuss.pytorch.org/t/can-we-use-pre-trained-word-embeddings-for-weight-initialization-in-nn-embedding/1222/2
-        self.embedding = nn.Embedding(pretrained_emb.size(0), pretrained_emb.size(1))
-        self.embedding.weight = nn.Parameter(pretrained_emb)
-        self.embedding.weight.requires_grad = fine_tune
-        n_units[0] += pretrained_emb.size(1)
-
-        self.layer_stack = nn.ModuleList()
-        for i in range(self.n_layer):
-            # consider multi head from last layer
-            f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
-            self.layer_stack.append(
-                    BatchMultiHeadGraphAttention(n_heads[i], f_in=f_in,
-                        f_out=n_units[i + 1], attn_dropout=attn_dropout)
-                    )
-        self.fc_layer = nn.Linear(in_features=n_units[-1], out_features=2)
-
-    def forward(self, x, vertices, adj):
-        emb = self.embedding(vertices)
-        if self.inst_norm:
-            emb = self.norm(emb.transpose(1, 2)).transpose(1, 2)
-        x = torch.cat((x, emb), dim=2)
-        bs, n = adj.size()[:2]
-        for i, gat_layer in enumerate(self.layer_stack):
-            x = gat_layer(x, adj) # bs x n_head x n x f_out
-            if i + 1 == self.n_layer:
-                x = x.mean(dim=1)
-            else:
-                x = F.elu(x.transpose(1, 2).contiguous().view(bs, n, -1))
-                x = F.dropout(x, self.dropout, training=self.training)
-        # x = self.fc_layer(x)
-        return F.log_softmax(x, dim=-1)
-
-class BatchGAT2(nn.Module):
-    def __init__(self, n_units=[1433, 8, 7], n_heads=[8, 1], dropout=0.1, attn_dropout=0.2, fine_tune=False, instance_normalization=True):
-        super(BatchGAT2, self).__init__()
-        self.n_layer = len(n_units) - 1
-        self.dropout = dropout
-        
-        self.layer_stack = nn.ModuleList()
-        for i in range(self.n_layer):
-            # consider multi head from last layer
-            f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
-            self.layer_stack.append(
-                    BatchMultiHeadGraphAttention(n_heads[i], f_in=f_in,
-                        f_out=n_units[i + 1], attn_dropout=attn_dropout)
-                    )
-        self.fc_layer = nn.Linear(in_features=n_units[-1], out_features=2)
-
-    def forward(self, x, adj):
-        bs, n = adj.size()[:2]
-        for i, gat_layer in enumerate(self.layer_stack):
-            x = gat_layer(x, adj) # bs x n_head x n x f_out
-            if i + 1 == self.n_layer:
-                x = x.mean(dim=1)
-            else:
-                x = F.elu(x.transpose(1, 2).contiguous().view(bs, n, -1))
-                x = F.dropout(x, self.dropout, training=self.training)
-        # x = self.fc_layer(x)
-        return F.log_softmax(x, dim=-1)
