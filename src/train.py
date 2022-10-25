@@ -47,14 +47,16 @@ class HeterDataset(Dataset):
         # NOTE: extend vertex_ids and adjs according to tweet_ids
         hs_filedir = os.path.join(DATA_ROOTPATH, self.file_dir).replace('stages_', 'hs_')
         self.adjs = load_pickle(os.path.join(hs_filedir, "extended_adjs.p"))
-        self.vertex_ids = load_pickle(os.path.join(hs_filedir, "extended_vertices.p"))
-        tweet_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/doc2topic_tweetfeat.p"))
+        vertex_ids = load_pickle(os.path.join(hs_filedir, "extended_vertices.p"))
+        num_tweets = vertex_ids.shape[1] - self.vertex_ids.shape[1]
+        self.vertex_ids = vertex_ids
+        tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/doc2topic_tweetfeat.p"))
         ids = load_pickle(os.path.join(hs_filedir, "sample_ids.p"))
-        logger.info(f"{np.append(self.feats[ids], np.zeros((self.feats[ids].shape[0], tweet_feats.shape[1], self.feats[ids].shape[2]))).shape}, {tweet_feats[self.vertex_ids].shape}")
-        self.feats = np.concatenate((
-            np.append(self.feats[ids], np.zeros((self.feats[ids].shape[0], tweet_feats.shape[1], self.feats[ids].shape[2]))), 
-            tweet_feats[self.vertex_ids]
-        ), axis=1)
+        
+        user_feats, tweet_feats = self.feats[ids], tweet_features[self.vertex_ids[:,20:]]
+        tmp1 = np.append(user_feats, np.zeros((user_feats.shape[0], num_tweets, user_feats.shape[2])), axis=1)
+        tmp2 = np.append(np.zeros((tweet_feats.shape[0], self.user_num, tweet_feats.shape[2])), tweet_feats, axis=1)
+        self.feats = np.concatenate((tmp1, tmp2), axis=2)
         self.labels, self.tags, self.stages = self.labels[ids], self.tags[ids], self.stages[ids]
         logger.info(f"{self.adjs.shape}, {self.vertex_ids.shape}, {self.labels.shape}, {self.feats.shape}, {self.tags.shape}, {self.stages.shape}")
     
