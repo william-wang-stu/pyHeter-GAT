@@ -17,6 +17,12 @@ from tensorboard_logger import tensorboard_logger
 from torch.utils.data.sampler import Sampler
 from torch.utils.data import Dataset
 from scipy.sparse import csr_matrix
+import copy
+import configparser
+
+config = configparser.ConfigParser()
+config.read('config.ini')
+DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
 
 class SubGraphSample:
     # NOTE: "Mutable Default Arguments": 
@@ -60,20 +66,6 @@ class HeterSubGraphSample:
     def __len__(self):
         return len(self.labels)
 
-class HeterGraphDataset(Dataset):
-    def __init__(self, heter_samples: HeterSubGraphSample) -> None:
-        super().__init__()
-        # self.uugraph = heter_samples.heter_adj_matrices[0]
-        # self.utgraph = heter_samples.heter_adj_matrices[1]
-        self.uugraph = heter_samples.heter_adj_matrices[:,0]
-        self.utgraph = heter_samples.heter_adj_matrices[:,1]
-        self.labels  = heter_samples.labels
-        self.feats   = heter_samples.initial_features
-    def __len__(self):
-        return self.labels.shape[0]
-    def __getitem__(self, index):
-        return self.uugraph[index], self.utgraph[index], self.labels[index], self.feats[index]
-
 class ChunkSampler(Sampler):
     """
     Samples elements sequentially from some offset.
@@ -90,47 +82,6 @@ class ChunkSampler(Sampler):
 
     def __len__(self):
         return self.num_samples
-
-def init_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-    parser.add_argument('--model', type=str, default='heterdensegat', help="available options are ['batchdensegat', 'heterdensegat']")
-    parser.add_argument('--seed', type=int, default=42, help='Random seed.')
-    parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
-    parser.add_argument('--lr', type=float, default=0.1, help='Initial learning rate.')
-    parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
-    parser.add_argument('--file-dir', type=str, required=True, help="Input file directory")
-    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate (1 - keep probability).')
-    parser.add_argument('--attn-dropout', type=float, default=0.5, help='Attn Dropout rate (1 - keep probability).')
-    parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
-    parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
-    parser.add_argument('--batch', type=int, default=1024, help="Batch size")
-    parser.add_argument('--check-point', type=int, default=10, help="Check point")
-    parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
-    parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
-    parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
-    parser.add_argument('--instance-normalization', action='store_true', default=True, help="Enable instance normalization")
-    parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
-    # parser.add_argument('--use-infdataset', action='store_true', default=False, help="Use Influence Dataset")
-    # parser.add_argument('--use-pretrained-emb', action='store_true', default=True, help="Use Pretrained Emb, Else concact emb with other feats")
-    parser.add_argument('--use-user-emb', action='store_true', default=False, help="Whether to use User Emb")
-
-    args = parser.parse_args()
-    args.cuda = torch.cuda.is_available()
-    logger.info(f"Args: {args}")
-
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if args.cuda:
-        torch.cuda.manual_seed(args.seed)
-    
-    tensorboard_log_dir = 'tensorboard/%s_%s_lr%f_bs%d_hid%s:%s' % (args.model, args.tensorboard_log, args.lr, args.batch, args.hidden_units, args.heads)
-    os.makedirs(tensorboard_log_dir, exist_ok=True)
-    shutil.rmtree(tensorboard_log_dir)
-    tensorboard_logger.configure(tensorboard_log_dir)
-    logger.info('tensorboard logging to %s', tensorboard_log_dir)
-
-    return args
 
 def save_pickle(obj, filename):
     with open(filename, "wb") as f:
@@ -386,3 +337,78 @@ def load_w2v_feature(file, max_idx=0):
     for item in feature:
         assert len(item) == d
     return np.array(feature, dtype=np.float32)
+
+def gen_random_tweet_ids(samples: SubGraphSample, outdir: str, tweets_per_user:int=5):
+    tweet_ids = []
+    sample_ids = []
+    ut_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
+
+    for idx in range(len(samples.labels)):
+        if idx and idx % 10000 == 0:
+            logger.info(f"idx={idx}, sample_ids={len(sample_ids)}, tweet_ids={len(tweet_ids)}")
+        stage = samples.time_stages[idx]
+        selected_tweet_ids  = set()
+        candidate_tweet_ids = set()
+        for vertex_id in samples.vertex_ids[idx]:
+            available_tweet_ids = ut_mp[stage][vertex_id]
+            random_ids = np.random.choice(available_tweet_ids, size=min(tweets_per_user, len(available_tweet_ids)), replace=False)
+            selected_tweet_ids  |= set(random_ids)
+            candidate_tweet_ids |= set(available_tweet_ids)-set(random_ids)
+        candidate_tweet_ids -= selected_tweet_ids
+        # logger.info(f"Length: sample={len(selected_tweet_ids)}, remain={len(candidate_tweet_ids)}, expected={len(samples.vertex_ids[idx])*tweets_per_user}")
+
+        if len(selected_tweet_ids) != len(samples.vertex_ids[idx])*tweets_per_user:
+            diff = len(samples.vertex_ids[idx])*tweets_per_user - len(selected_tweet_ids)
+            if diff > len(candidate_tweet_ids):
+                continue
+            selected_tweet_ids |= set(np.random.choice(list(candidate_tweet_ids), size=diff, replace=False))
+        sample_ids.append(idx)
+        tweet_ids.append(selected_tweet_ids)
+    logger.info(f"Finish Sampling Random Tweets... sample_ids={len(sample_ids)}, tweet_ids={len(tweet_ids)}")
+
+    os.makedirs(outdir, exist_ok=True)
+    selected_samples = SubGraphSample(
+        adj_matrices=samples.adj_matrices[sample_ids],
+        influence_features=samples.influence_features[sample_ids],
+        vertex_ids=samples.vertex_ids[sample_ids],
+        labels=samples.labels[sample_ids],
+        tags=samples.tags[sample_ids],
+        time_stages=samples.time_stages[sample_ids],
+    )
+    save_pickle(sample_ids, os.path.join(outdir, "sample_ids.p"))
+    save_pickle(tweet_ids, os.path.join(outdir, "tweet_ids.p"))
+    save_pickle(selected_samples, os.path.join(outdir, "selected_samples.p"))
+    logger.info("Finish Saving pkl...")
+
+def extend_subnetwork(file_dir: str):
+    hs_filedir = os.path.join(DATA_ROOTPATH, file_dir).replace('stages_', 'hs_')
+    samples = load_pickle(os.path.join(hs_filedir, "selected_samples.p"))
+    tweet_ids = load_pickle(os.path.join(hs_filedir, "tweet_ids.p"))
+    assert len(samples) == len(tweet_ids)
+
+    tweetid2userid_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/tweetid2userid_mp.p"))
+    vertex_ids = samples.vertex_ids
+    adjs       = samples.adj_matrices
+    adjs[adjs != 0] = 1.0
+    adjs = adjs.astype(np.dtype('B'))
+
+    extended_vertices, extended_adjs = [], []
+    for idx in range(len(samples)):
+        subnetwork = np.array(np.concatenate((vertex_ids[idx], np.array(list(tweet_ids[idx])))), dtype=int)
+        extended_vertices.append(subnetwork)
+
+        subnetwork_size, num_users = len(subnetwork), len(vertex_ids[idx])
+        elem_idx_mp = {elem:idx for idx,elem in enumerate(subnetwork)}
+        uu_adj = np.array([[0]*subnetwork_size for _ in range(subnetwork_size)], dtype='B')
+        uu_adj[:num_users,:num_users] = adjs[idx]
+        # NOTE: Get Corresponding User_id By Tweet_id, and then convert them into indexes in extend_subnetwork
+        ut_adj = copy.deepcopy(uu_adj)
+        for tweet_id in tweet_ids[idx]:
+            user_id = tweetid2userid_mp[tweet_id]
+            net_userid = elem_idx_mp[user_id]
+            net_tweetid = elem_idx_mp[tweet_id]
+            ut_adj[net_userid][net_tweetid] = 1
+        extended_adjs.append([uu_adj, ut_adj])
+    extended_vertices, extended_adjs = np.array(extended_vertices), np.array(extended_adjs)
+    save_pickle(extended_vertices, os.path.join(hs_filedir, "extended_vertices.p"))
+    save_pickle(extended_adjs, os.path.join(hs_filedir, "extended_adjs.p"))

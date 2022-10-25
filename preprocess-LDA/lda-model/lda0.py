@@ -45,7 +45,20 @@ save_pickle(doc_topic, f"doc2topic/doc_topic_0{texts_idx}_k{args.k}_maxiter50.p"
 save_pickle(LDA_model, f"model/model_0{texts_idx}_k{args.k}_maxiter50.p")
 
 
+import pyLDAvis.sklearn
+panel = pyLDAvis.sklearn.prepare(LDA_model, dtm1, cv1, mds='tsne') # Create the panel for the visualization
+pyLDAvis.save_html(panel, 'LDA-vis.html')
+logger.info("Finish Saving to html...")
+
 # import pyLDAvis.sklearn
-# panel = pyLDAvis.sklearn.prepare(LDA_model, dtm1, cv1, mds='tsne') # Create the panel for the visualization
-# pyLDAvis.save_html(panel, 'LDA-vis.html')
-# logger.info("Finish Saving to html...")
+
+# for idx in range(5, 11):
+#     name = f"_0{idx}_k{45}_maxiter{50}"
+
+#     model = load_pickle(f"model/model{name}.p")
+#     dtm   = load_pickle(f"dtm/dtm{name}.p")
+#     cv    = load_pickle(f"cv/cv{name}.p")
+
+#     panel = pyLDAvis.sklearn.prepare(model, dtm, cv, mds='tsne') # Create the panel for the visualization
+#     pyLDAvis.save_html(panel, f'LDAvis{name}.html')
+#     logger.info("Finish Saving to html...")

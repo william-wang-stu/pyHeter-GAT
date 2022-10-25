@@ -11,9 +11,11 @@ import os
 sys.path.append(os.path.dirname(os.getcwd()))
 
 from lib.log import logger
-from utils import load_pickle, save_pickle, init_args, ChunkSampler, SubGraphSample, load_w2v_feature
+from utils import load_pickle, save_pickle, ChunkSampler, SubGraphSample, load_w2v_feature, gen_random_tweet_ids, extend_subnetwork, DATA_ROOTPATH
 from model import BatchdenseGAT, HeterdenseGAT
 import numpy as np
+import argparse
+import shutil
 import time
 import torch
 import torch.optim as optim
@@ -22,15 +24,12 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from tensorboard_logger import tensorboard_logger
 from torch.utils.data import Dataset
-import configparser
 
-config = configparser.ConfigParser()
-config.read('config.ini')
-DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
 logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}")
 
-class DiggDataset(Dataset):
-    def __init__(self, samples: SubGraphSample, embedding, args) -> None:
+# NOTE: Preliminaries: gen_random_tweet_ids(), extend_subnetwork() -> hs_stages_*/{extended_adjs.p, extended_vertices.p, sample_ids.p}
+class HeterDataset(Dataset):
+    def __init__(self, samples: SubGraphSample, args) -> None:
         super().__init__()
         self.adjs = samples.adj_matrices
         self.labels = samples.labels
@@ -38,31 +37,45 @@ class DiggDataset(Dataset):
         self.vertex_ids = samples.vertex_ids
         self.tags = samples.tags
         self.stages = samples.time_stages
+        self.file_dir = args.file_dir
+        self.user_num = samples.influence_features.shape[1]
+        self.extend_hetergraph()
+        self.add_self_loop()
         self.set_dtype()
-        # if not args.use_pretrained_emb:
-        #     self.concact_feats(embedding)
-        self.extend_graph()
-    def extend_graph(self):
-        # self-loop trick, the input graphs should have no self-loop
-        identity = np.identity(self.adjs.shape[1])
-        self.adjs += identity
-        self.adjs[self.adjs != 0] = 1.0
-        self.adjs = self.adjs.astype(np.dtype('B'))
-    def concact_feats(self, embedding):
-        feats = []
-        for idx, vertex_ids in enumerate(self.vertex_ids):
-            emb_feats = [embedding[user] for user in vertex_ids]
-            feats.append(np.concatenate((self.feats[idx], emb_feats), axis=1))
-        self.feats = np.array(feats)
+    
+    def extend_hetergraph(self):
+        # NOTE: extend vertex_ids and adjs according to tweet_ids
+        hs_filedir = os.path.join(DATA_ROOTPATH, self.file_dir).replace('stages_', 'hs_')
+        self.adjs = load_pickle(os.path.join(hs_filedir, "extended_adjs.p"))
+        self.vertex_ids = load_pickle(os.path.join(hs_filedir, "extended_vertices.p"))
+        tweet_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/doc2topic_tweetfeat.p"))
+        ids = load_pickle(os.path.join(hs_filedir, "sample_ids.p"))
+        logger.info(f"{np.append(self.feats[ids], np.zeros((self.feats[ids].shape[0], tweet_feats.shape[1], self.feats[ids].shape[2]))).shape}, {tweet_feats[self.vertex_ids].shape}")
+        self.feats = np.concatenate((
+            np.append(self.feats[ids], np.zeros((self.feats[ids].shape[0], tweet_feats.shape[1], self.feats[ids].shape[2]))), 
+            tweet_feats[self.vertex_ids]
+        ), axis=1)
+        self.labels, self.tags, self.stages = self.labels[ids], self.tags[ids], self.stages[ids]
+        logger.info(f"{self.adjs.shape}, {self.vertex_ids.shape}, {self.labels.shape}, {self.feats.shape}, {self.tags.shape}, {self.stages.shape}")
+    
+    def add_self_loop(self):
+        # NOTE: self-loop trick, the input graphs should have no self-loop
+        identity = np.identity(self.adjs.shape[2], dtype='B')
+        for idx in range(self.adjs.shape[1]):
+            self.adjs[:,idx] += identity
+    
     def set_dtype(self):
-        self.adjs  = np.float64(self.adjs)
         self.feats = np.float32(self.feats)
+    
     def get_user_num(self):
-        return self.feats.shape[1]
+        return self.user_num
+    
     def get_feature_dim(self):
         return self.feats.shape[2]
+    
     def __len__(self):
         return self.labels.shape[0]
+    
     def __getitem__(self, index):
         return self.adjs[index], self.feats[index], self.labels[index], self.vertex_ids[index], self.tags[index], self.stages[index]
 
@@ -79,7 +92,7 @@ def gen_user_emb(tot_user_num):
     user_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features.p"))
     return torch.FloatTensor(user_feats)
 
-def digg_load_dataset(args):
+def heter_load_dataset(args):
     data_dirpath = os.path.join(DATA_ROOTPATH, args.file_dir)
     embedding_path = os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64")
     vertices = np.load(os.path.join(data_dirpath, "vertex_id.npy"))
@@ -95,15 +108,52 @@ def digg_load_dataset(args):
         tags=np.load(os.path.join(data_dirpath, "hashtag.npy")),
         time_stages=np.load(os.path.join(data_dirpath, "stage.npy"))
     )
-    dataset = DiggDataset(samples, embedding, args)
+    dataset = HeterDataset(samples, args)
     nb_classes = 2
     class_weight = torch.FloatTensor(len(dataset) / (nb_classes*np.bincount(samples.labels))) if args.class_weight_balanced else torch.ones(nb_classes)
     feature_dim = dataset.get_feature_dim()
     
     return dataset, embedding, user_emb, class_weight, feature_dim, nb_classes
 
-args = init_args()
-dataset, embedding, user_emb, class_weight, feature_dim, nb_classes = digg_load_dataset(args)
+parser = argparse.ArgumentParser()
+parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
+parser.add_argument('--model', type=str, default='heterdensegat', help="available options are ['batchdensegat', 'heterdensegat']")
+parser.add_argument('--seed', type=int, default=42, help='Random seed.')
+parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
+parser.add_argument('--lr', type=float, default=0.1, help='Initial learning rate.')
+parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
+parser.add_argument('--file-dir', type=str, required=True, help="Input file directory")
+parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate (1 - keep probability).')
+parser.add_argument('--attn-dropout', type=float, default=0.5, help='Attn Dropout rate (1 - keep probability).')
+parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
+parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
+parser.add_argument('--batch', type=int, default=1024, help="Batch size")
+parser.add_argument('--check-point', type=int, default=10, help="Check point")
+parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
+parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
+parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
+parser.add_argument('--instance-normalization', action='store_true', default=True, help="Enable instance normalization")
+parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
+# parser.add_argument('--use-infdataset', action='store_true', default=False, help="Use Influence Dataset")
+# parser.add_argument('--use-pretrained-emb', action='store_true', default=True, help="Use Pretrained Emb, Else concact emb with other feats")
+parser.add_argument('--use-user-emb', action='store_true', default=False, help="Whether to use User Emb")
+
+args = parser.parse_args()
+args.cuda = torch.cuda.is_available()
+logger.info(f"Args: {args}")
+
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+if args.cuda:
+    torch.cuda.manual_seed(args.seed)
+
+tensorboard_log_dir = 'tensorboard/%s_%s_lr%f_bs%d_hid%s:%s' % (args.model, args.tensorboard_log, args.lr, args.batch, args.hidden_units, args.heads)
+os.makedirs(tensorboard_log_dir, exist_ok=True)
+shutil.rmtree(tensorboard_log_dir)
+tensorboard_logger.configure(tensorboard_log_dir)
+logger.info('tensorboard logging to %s', tensorboard_log_dir)
+
+dataset, embedding, user_emb, class_weight, feature_dim, nb_classes = heter_load_dataset(args)
 N = len(dataset)
 n_units = [feature_dim]+[int(x) for x in args.hidden_units.strip().split(",")]+[nb_classes]
 n_heads = [int(x) for x in args.heads.strip().split(",")]+[1]
@@ -155,7 +205,7 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
         if args.model == 'batchdensegat':
             output = model(vertices, graph, features, user_feats)
         elif args.model == 'heterdensegat':
-            output = model(vertices, [graph, graph], features, user_feats)
+            output = model(vertices, [graph[:,0], graph[:,1]], features, user_feats)
         if args.model[-3:] == "gat":
             output = output[:, -1, :]
         loss_batch = F.nll_loss(output, labels, class_weight)
@@ -222,7 +272,7 @@ def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
         if args.model == 'batchdensegat':
             output = model(vertices, graph, features, user_feats)
         elif args.model == 'heterdensegat':
-            output = model(vertices, [graph, graph], features, user_feats)
+            output = model(vertices, [graph[:,0], graph[:,1]], features, user_feats)
         if args.model[-3:] == "gat":
             output = output[:, -1, :]
         loss_train = F.nll_loss(output, labels, class_weight)

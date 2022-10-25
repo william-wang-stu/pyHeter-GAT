@@ -2,6 +2,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.getcwd()))
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -411,9 +412,10 @@ class HeterdenseGAT(nn.Module):
     
     def forward(self, vertices, hadj, h, user_emb=None):
         # NOTE: h: (bs, n, fin), vertices: (bs, n), hadj: (|Rs|, bs, n, n)
-        emb = self.embedding(vertices)
+        emb = self.embedding(vertices[:,:self.n_user])
         if self.inst_norm:
             emb = self.norm1(emb.transpose(1, 2)).transpose(1, 2)
+        emb = torch.cat((emb, torch.empty(emb.size(0), vertices.shape[1]-emb.size(1), emb.size(2)).fill_(0).to(emb.device)), dim=1) # (bs, n_user, f_emb) -> (bs, n, f_emb)
         h = torch.cat((h, emb), dim=2)
         if self.use_user_emb:
             if self.inst_norm:
