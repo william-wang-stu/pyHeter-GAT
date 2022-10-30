@@ -73,15 +73,16 @@ class ChunkSampler(Sampler):
         num_samples: # of desired datapoints
         start: offset where we should start selecting from
     """
-    def __init__(self, num_samples, start=0):
+    def __init__(self, num_samples, start=0, gap=1):
         self.num_samples = num_samples
         self.start = start
+        self.gap = gap
 
     def __iter__(self):
-        return iter(range(self.start, self.start + self.num_samples))
+        return iter(range(self.start, self.start + self.num_samples, self.gap))
 
     def __len__(self):
-        return self.num_samples
+        return self.num_samples // self.gap
 
 def save_pickle(obj, filename):
     with open(filename, "wb") as f:
