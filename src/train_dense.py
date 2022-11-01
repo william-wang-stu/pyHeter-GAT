@@ -39,7 +39,8 @@ class HeterDataset(Dataset):
         self.stages = samples.time_stages
         self.file_dir = args.file_dir
         self.user_num = samples.influence_features.shape[1]
-        self.extend_hetergraph()
+        if args.model == 'heterdensegat':
+            self.extend_hetergraph()
         self.add_self_loop()
         self.set_dtype()
     
@@ -63,8 +64,11 @@ class HeterDataset(Dataset):
     def add_self_loop(self):
         # NOTE: self-loop trick, the input graphs should have no self-loop
         identity = np.identity(self.adjs.shape[2], dtype='B')
-        for idx in range(self.adjs.shape[1]):
-            self.adjs[:,idx] += identity
+        if args.model == 'batchdensegat':
+            self.adjs += identity
+        elif args.model == 'heterdensegat':
+            for idx in range(self.adjs.shape[1]):
+                self.adjs[:,idx] += identity
     
     def set_dtype(self):
         self.feats = np.float32(self.feats)

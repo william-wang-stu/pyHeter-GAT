@@ -70,8 +70,11 @@ class HeterDataset(Dataset):
         # NOTE: self-loop trick, the input graphs should have no self-loop
         if type(self.adjs[0][0]) == np.ndarray:
             identity = np.identity(self.adjs.shape[2], dtype='B')
-            for idx in range(self.adjs.shape[1]):
-                self.adjs[:,idx] += identity
+            if args.model == 'batchdensegat':
+                self.adjs += identity
+            elif args.model == 'heterdensegat':
+                for idx in range(self.adjs.shape[1]):
+                    self.adjs[:,idx] += identity
         elif type(self.adjs[0][0]) == sparse._csr.csr_matrix:
             sparse_identity = sparse.identity(self.adjs[0][0].shape[0], dtype=self.adjs[0][0].dtype)
             for idx in range(self.adjs.shape[0]):
@@ -161,6 +164,7 @@ parser.add_argument('--attn-dropout', type=float, default=0.5, help='Attn Dropou
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
 parser.add_argument('--batch', type=int, default=1024, help="Batch size")
+parser.add_argument('--sample_gap', type=int, default=10, help="Sample Gap in Train/Valid/Test Sets")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
 parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
@@ -191,13 +195,12 @@ n_heads = [int(x) for x in args.heads.strip().split(",")]+[1]
 logger.info(f"Preparing Args... samples={N}, class_weight={class_weight[0]:.2f}:{class_weight[1]:.2f}, feature_dim={feature_dim}, nb_classes={nb_classes}, n_units={n_units}, n_heads={n_heads}")
 logger.info(f"pretrained_emb size={embedding.shape}, user_emb size={user_emb.size()}")
 
-sample_gap = 20
 train_start,  valid_start, test_start = 0, int(N * args.train_ratio / 100), int(N * (args.train_ratio + args.valid_ratio) / 100)
-train_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(valid_start - train_start, 0, sample_gap), collate_fn=collate_fn2)
-valid_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(test_start - valid_start, valid_start, sample_gap), collate_fn=collate_fn2)
-test_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(N - test_start, test_start, sample_gap), collate_fn=collate_fn2)
+train_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(valid_start - train_start, 0, args.sample_gap), collate_fn=collate_fn2)
+valid_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(test_start - valid_start, valid_start, args.sample_gap), collate_fn=collate_fn2)
+test_loader = DataLoader(dataset, batch_size=args.batch, sampler=ChunkSampler(N - test_start, test_start, args.sample_gap), collate_fn=collate_fn2)
 
-logger.info(f"Loading Dataset... train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
+logger.info(f"Loading Dataset... gap={args.sample_gap}, train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
 
 if args.model == 'batchdensegat':
     model = BatchdenseGAT(pretrained_emb=torch.FloatTensor(embedding), n_units=n_units, n_heads=n_heads, 
@@ -208,7 +211,7 @@ elif args.model == 'heterdensegat':
         attn_dropout=args.attn_dropout, dropout=args.dropout, use_user_emb=args.use_user_emb)
 elif args.model == 'hetersparsegat':
     model = HetersparseGAT(n_user=dataset.get_user_num(), pretrained_emb=torch.FloatTensor(embedding), 
-        nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout)
+        nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout, instance_normalization=args.instance_normalization)
 logger.info(f"model: {model}")
 
 if args.cuda:
@@ -245,7 +248,7 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
             output = output[:,-1,:]
         elif args.model == 'hetersparsegat':
             # assert args.batch == 1
-            output = model(features[0], vertices[0], [graphs[0][0], graphs[0][1]])
+            output = model([graphs[0][0], graphs[0][1]], features[0], vertices[0])
             output = output[-1,:].reshape(1,-1)
         loss_batch = F.nll_loss(output, labels, class_weight)
         loss += bs * loss_batch.item()
@@ -316,7 +319,7 @@ def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
             output = output[:,-1,:]
         elif args.model == 'hetersparsegat':
             # assert args.batch == 1
-            output = model(features[0], vertices[0], [graphs[0][0], graphs[0][1]])
+            output = model([graphs[0][0], graphs[0][1]], features[0], vertices[0])
             output = output[-1,:].reshape(1,-1)
         loss_train = F.nll_loss(output, labels, class_weight)
         loss += bs * loss_train.item()
