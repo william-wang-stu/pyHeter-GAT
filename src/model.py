@@ -322,7 +322,7 @@ class HetersparseGAT(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.n_layer = len(n_units) - 2
+        self.n_layer = len(n_units)-1
         self.dropout = dropout
 
         self.use_pretrained_emb = use_pretrained_emb
@@ -368,55 +368,6 @@ class HetersparseGAT(nn.Module):
             x = h
             for i, gat_layer in enumerate(layer_stack):
                 x = gat_layer(x, hadj[heter_idx]) # output: (n, n_head, f_out)
-                if i + 1 == self.n_layer:
-                    x = x.mean(dim=1) # (n, n_head, f_out) -> (n, f_out)
-                else:
-                    x = F.elu(x.reshape(n, -1)) # (n, n_head, f_out) -> (n, n_head*f_out)
-                    x = F.dropout(x, self.dropout, training=self.training)
-            heter_embs.append(x[:self.n_user].unsqueeze(-2)) # (Nu, 1, f_out)
-        type_aware_emb = torch.cat(heter_embs, dim=-2) # (Nu, |Rs|, D')
-        type_fusion_emb = self.additive_attention(h[:self.n_user], type_aware_emb) # (Nu, 1, D')
-        ret = self.fc_layer(
-            torch.cat((type_aware_emb, type_fusion_emb),dim=1).reshape(self.n_user,-1), # (Nu, |Rs|+1, D') -> (Nu, (|Rs|+1)*D')
-        ) #  (Nu, nb_classes)
-        return F.log_softmax(ret, dim=-1)
-
-class HeterdglGAT(nn.Module):
-    def __init__(
-        self, n_user, 
-        nb_node_kinds=2, nb_classes=2, n_units=[25,64], n_heads=[3], d2=64,
-        attn_dropout=0.5, dropout=0.1, 
-    ) -> None:
-        super().__init__()
-
-        self.n_layer = len(n_units) - 2
-        self.dropout = dropout
-        
-        self.d  = n_units[0]
-        self.d1 = n_units[1]
-        self.d2 = n_units[1]
-        self.n_user = n_user
-
-        self.layer_stack = nn.ModuleList()
-        for _ in range(nb_node_kinds):
-            layer_stack = nn.ModuleList()
-            for i in range(self.n_layer):
-                f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
-                layer_stack.append(
-                    GATConv(num_heads=n_heads[i], in_feats=f_in, out_feats=n_units[i+1], attn_drop=attn_dropout, feat_drop=attn_dropout)
-                    # allow_zero_in_degree
-                )
-            self.layer_stack.append(layer_stack)
-        self.additive_attention = AdditiveAttention(d=self.d, d1=self.d1, d2=self.d2)
-        self.fc_layer = nn.Linear(in_features=self.d1*(nb_node_kinds+1), out_features=nb_classes)
-    
-    def forward(self, graphs, feats):
-        n = feats.shape[0]
-        heter_embs = []
-        for heter_idx, layer_stack in enumerate(self.layer_stack):
-            x = feats
-            for i, gat_layer in enumerate(layer_stack):
-                x = gat_layer(graphs[i], feats) # output: (n, n_head, f_out)
                 if i + 1 == self.n_layer:
                     x = x.mean(dim=1) # (n, n_head, f_out) -> (n, f_out)
                 else:

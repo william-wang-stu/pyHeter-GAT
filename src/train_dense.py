@@ -134,6 +134,7 @@ parser.add_argument('--attn-dropout', type=float, default=0.5, help='Attn Dropou
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
 parser.add_argument('--batch', type=int, default=1024, help="Batch size")
+parser.add_argument('--loop', type=int, default=1, help="Loop")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
 parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
@@ -194,33 +195,34 @@ def evaluate(epoch, loader, thr=None, return_best_thr=False, log_desc='valid_'):
     loss, prec, rec, f1 = 0., 0., 0., 0.
     y_true, y_pred, y_score = [], [], []
     for i_batch, batch in enumerate(loader):
-        graph, features, labels, vertices, tags, stages = batch
-        bs = graph.size(0)
+        for _ in range(args.loop):
+            graph, features, labels, vertices, tags, stages = batch
+            bs = graph.size(0)
 
-        if args.cuda:
-            features, graph, labels, vertices, tags, stages = features.to(args.gpu), graph.to(args.gpu), labels.to(args.gpu), vertices.to(args.gpu), tags.to(args.gpu), stages.to(args.gpu)
-        
-        if args.use_user_emb:
-            user_feats = torch.stack([
-                user_emb[:,tags*8*3+stages*3+idx].T.gather(dim=1, index=vertices)
-            for idx in range(3)], dim=2)
-            user_feats = user_feats.to(args.gpu)
-        else:
-            user_feats = None
-        
-        if args.model == 'batchdensegat':
-            output = model(vertices, graph, features, user_feats)
-        elif args.model == 'heterdensegat':
-            output = model(vertices, [graph[:,0], graph[:,1]], features, user_feats)
-        if args.model[-3:] == "gat":
-            output = output[:, -1, :]
-        loss_batch = F.nll_loss(output, labels, class_weight)
-        loss += bs * loss_batch.item()
+            if args.cuda:
+                features, graph, labels, vertices, tags, stages = features.to(args.gpu), graph.to(args.gpu), labels.to(args.gpu), vertices.to(args.gpu), tags.to(args.gpu), stages.to(args.gpu)
+            
+            if args.use_user_emb:
+                user_feats = torch.stack([
+                    user_emb[:,tags*8*3+stages*3+idx].T.gather(dim=1, index=vertices)
+                for idx in range(3)], dim=2)
+                user_feats = user_feats.to(args.gpu)
+            else:
+                user_feats = None
+            
+            if args.model == 'batchdensegat':
+                output = model(vertices, graph, features, user_feats)
+            elif args.model == 'heterdensegat':
+                output = model(vertices, [graph[:,0], graph[:,1]], features, user_feats)
+            if args.model[-3:] == "gat":
+                output = output[:, -1, :]
+            loss_batch = F.nll_loss(output, labels, class_weight)
+            loss += bs * loss_batch.item()
 
-        y_true += labels.data.tolist()
-        y_pred += output.max(1)[1].data.tolist()
-        y_score += output[:, 1].data.tolist()
-        total += bs
+            y_true += labels.data.tolist()
+            y_pred += output.max(1)[1].data.tolist()
+            y_score += output[:, 1].data.tolist()
+            total += bs
 
     model.train()
 
@@ -260,32 +262,33 @@ def train(epoch, train_loader, valid_loader, test_loader, log_desc='train_'):
     loss = 0.
     total = 0.
     for i_batch, batch in enumerate(train_loader):
-        graph, features, labels, vertices, tags, stages = batch
-        bs = graph.size(0)
+        for _ in range(args.loop):
+            graph, features, labels, vertices, tags, stages = batch
+            bs = graph.size(0)
 
-        if args.cuda:
-            features, graph, labels, vertices, tags, stages = features.to(args.gpu), graph.to(args.gpu), labels.to(args.gpu), vertices.to(args.gpu), tags.to(args.gpu), stages.to(args.gpu)
-        
-        optimizer.zero_grad()
-        if args.use_user_emb:
-            user_feats = torch.stack([
-                user_emb[:,tags*8*3+stages*3+idx].T.gather(dim=1, index=vertices)
-            for idx in range(3)], dim=2)
-            user_feats = user_feats.to(args.gpu)
-        else:
-            user_feats = None
-        
-        if args.model == 'batchdensegat':
-            output = model(vertices, graph, features, user_feats)
-        elif args.model == 'heterdensegat':
-            output = model(vertices, [graph[:,0], graph[:,1]], features, user_feats)
-        if args.model[-3:] == "gat":
-            output = output[:, -1, :]
-        loss_train = F.nll_loss(output, labels, class_weight)
-        loss += bs * loss_train.item()
-        total += bs
-        loss_train.backward()
-        optimizer.step()
+            if args.cuda:
+                features, graph, labels, vertices, tags, stages = features.to(args.gpu), graph.to(args.gpu), labels.to(args.gpu), vertices.to(args.gpu), tags.to(args.gpu), stages.to(args.gpu)
+            
+            optimizer.zero_grad()
+            if args.use_user_emb:
+                user_feats = torch.stack([
+                    user_emb[:,tags*8*3+stages*3+idx].T.gather(dim=1, index=vertices)
+                for idx in range(3)], dim=2)
+                user_feats = user_feats.to(args.gpu)
+            else:
+                user_feats = None
+            
+            if args.model == 'batchdensegat':
+                output = model(vertices, graph, features, user_feats)
+            elif args.model == 'heterdensegat':
+                output = model(vertices, [graph[:,0], graph[:,1]], features, user_feats)
+            if args.model[-3:] == "gat":
+                output = output[:, -1, :]
+            loss_train = F.nll_loss(output, labels, class_weight)
+            loss += bs * loss_train.item()
+            total += bs
+            loss_train.backward()
+            optimizer.step()
     logger.info("train loss in this epoch %f", loss / total)
     tensorboard_logger.log_value('train_loss', loss / total, epoch + 1)
     if (epoch + 1) % args.check_point == 0:

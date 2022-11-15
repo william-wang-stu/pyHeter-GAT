@@ -10,12 +10,12 @@ import igraph
 import os
 import random
 import psutil
-import argparse
+import datetime
 import torch
-import shutil
 from tensorboard_logger import tensorboard_logger
 from torch.utils.data.sampler import Sampler
 from torch.utils.data import Dataset
+from scipy import sparse
 from scipy.sparse import csr_matrix
 import copy
 import configparser
@@ -83,6 +83,42 @@ class ChunkSampler(Sampler):
 
     def __len__(self):
         return self.num_samples // self.gap
+
+class EarlyStopping(object):
+    def __init__(self, patience=10):
+        dt = datetime.datetime.now()
+        self.filename = 'early_stop_{}_{:02d}-{:02d}-{:02d}.pth'.format(dt.date(), dt.hour, dt.minute, dt.second)
+        self.patience = patience
+        self.counter = 0
+        self.best_acc = None
+        self.best_loss = None
+        self.early_stop = False
+
+    def step(self, loss, acc, model):
+        if self.best_loss is None:
+            self.best_acc = acc
+            self.best_loss = loss
+            self.save_checkpoint(model)
+        elif (loss > self.best_loss) and (acc < self.best_acc):
+            self.counter += 1
+            logger.info(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            if (loss <= self.best_loss) and (acc >= self.best_acc):
+                self.save_checkpoint(model)
+            self.best_loss = np.min((loss, self.best_loss))
+            self.best_acc = np.max((acc, self.best_acc))
+            self.counter = 0
+        return self.early_stop
+
+    def save_checkpoint(self, model):
+        """Saves model when validation loss decreases."""
+        torch.save(model.state_dict(), self.filename)
+
+    def load_checkpoint(self, model):
+        """Load the latest checkpoint."""
+        model.load_state_dict(torch.load(self.filename))
 
 def save_pickle(obj, filename):
     with open(filename, "wb") as f:
@@ -339,11 +375,32 @@ def load_w2v_feature(file, max_idx=0):
         assert len(item) == d
     return np.array(feature, dtype=np.float32)
 
+def sample_tweets_around_user(users:set, ut_mp:dict, tweets_per_user:int, counts_matter:bool=False, return_edges:bool=False):
+    """
+    功能: 根据ut_mp为users中的每个user挑选min(tweets_per_user, len(ut_mp[user]))个推文邻居节点
+    参数: 
+        counts_matter表示总共挑选的推文节点数量必须等于len(users)*tweets_per_user,不满足则返回空推文节点集合
+    返回:
+        tweet_nodes(set), enough_tweet_nodes(bool,counts_matter=True), ut_edges(list,return_edges=True)
+    """
+    tweets, remaining_tweets, ut_edges = set(), set(), set()
+    for user in users:
+        selected_tweets = random.choices(ut_mp[user], k=min(len(ut_mp[user]), tweets_per_user))
+        tweets |= set(selected_tweets)
+        if counts_matter:
+            remaining_tweets |= set(ut_mp[user]) - set(selected_tweets)
+        if return_edges:
+            for tweet in selected_tweets:
+                ut_edges.add((user, tweet))
+    
+    return tweets, remaining_tweets, list(ut_edges)
+
 def gen_random_tweet_ids(samples: SubGraphSample, outdir: str, tweets_per_user:int=5):
     tweet_ids = []
     sample_ids = []
     ut_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
 
+    # TODO: 重构
     for idx in range(len(samples.labels)):
         if idx and idx % 10000 == 0:
             logger.info(f"idx={idx}, sample_ids={len(sample_ids)}, tweet_ids={len(tweet_ids)}")
@@ -413,3 +470,61 @@ def extend_subnetwork(file_dir: str):
     extended_vertices, extended_adjs = np.array(extended_vertices), np.array(extended_adjs)
     save_pickle(extended_vertices, os.path.join(hs_filedir, "extended_vertices.p"))
     save_pickle(extended_adjs, os.path.join(hs_filedir, "extended_adjs.p"))
+
+def reindex_graph(old_nodes:list, old_edges:list, add_self_loop:bool=True):
+    nodes = {}
+    node_indices, max_indices = 0, 0
+    for nodes_l in old_nodes:
+        for node in nodes_l:
+            nodes[node+max_indices] = node_indices
+            node_indices += 1
+        max_indices = max(list(nodes.keys()))+1
+    
+    edges = [[], []]
+    for from_, to_ in old_edges[0]:
+        edges[0].append((from_, to_))
+    offset = max(old_nodes[0])+1
+    for from_, to_ in old_edges[1]:
+        edges[1].append((nodes[from_], nodes[to_+offset]))
+    
+    if add_self_loop:
+        for node in range(len(old_nodes[0])):
+            edges[0].append((node, node))
+        for node in range(len(old_nodes[0]), node_indices):
+            edges[1].append((node, node))
+
+    return nodes, edges
+
+def create_sparsemat_from_edgelist(edgelist, m, n):
+    rows, cols = edgelist[:,0], edgelist[:,1]
+    ones = np.ones(len(rows), np.uint8)
+    mat = sparse.coo_matrix((ones, (rows, cols)), shape=(m, n))
+    return mat.tocsr()
+
+def extend_wholegraph(g, ut_mp, tweet_per_user=20):
+    """
+    功能: 在subg_deg483子图和ut_mp的基础上, 根据tweet_per_user参数重新生成hadjs和feats
+    """
+    user_nodes = g.vs["label"]
+    # NOTE: ut_mp用的是utmp_groupbystage, 这里先不考虑stage直接用最后一个时间片的ut_mp关系
+    tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=ut_mp[-1], tweets_per_user=tweet_per_user, return_edges=True)
+    tweet_nodes = list(tweet_nodes)
+
+    # Users: 44896, Tweets: 10008103, Total: 10052999
+    nodes, edges = reindex_graph([user_nodes, tweet_nodes], [g.get_edgelist(), ut_edges])
+
+    uu_mat = create_sparsemat_from_edgelist(np.array(edges[0]), len(nodes), len(nodes))
+    ut_mat = create_sparsemat_from_edgelist(np.array(edges[1]), len(nodes), len(nodes))
+    hadjs = [uu_mat, ut_mat]
+
+    user_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
+    deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), 208894)
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/doc2topic_tweetfeat.p"))
+    user_feats = np.concatenate((user_features[user_nodes], deepwalk_feats[user_nodes]), axis=1) 
+    tweet_feats = tweet_features[tweet_nodes]
+
+    feats = np.concatenate((
+        np.append(user_feats, np.zeros(shape=(user_feats.shape[0], tweet_feats.shape[1])),  axis=1), 
+        np.append(np.zeros(shape=(tweet_feats.shape[0], user_feats.shape[1])), tweet_feats, axis=1), 
+    ), axis=0)
+    return hadjs, feats
