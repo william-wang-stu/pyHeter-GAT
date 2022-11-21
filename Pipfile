@@ -1,0 +1,24 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+python-igraph = "*"
+gensim = "==3.8.3"
+sklearn = "*"
+ipykernel = "*"
+pandas = "*"
+pyldavis = "*"
+matplotlib = "*"
+seaborn = "*"
+tensorboard-logger = "*"
+protobuf = "==3.20.0"
+dgl = "*"
+tensorboard = "*"
+
+[dev-packages]
+torch-tb-profiler = "*"
+
+[requires]
+python_version = "3.8"

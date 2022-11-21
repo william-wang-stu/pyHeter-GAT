@@ -23,6 +23,7 @@ import configparser
 config = configparser.ConfigParser()
 config.read('config.ini')
 DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
+Ntimestage = int(config['DEFAULT']['Ntimestage'])
 
 class SubGraphSample:
     # NOTE: "Mutable Default Arguments": 
