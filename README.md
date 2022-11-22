@@ -6,5 +6,5 @@
 4. 在当前机器的对应仓库文件夹下关联gitee远程仓库`git remote add gitee git@gitee.com:wangzejian1120/py-heter-gat.git`(不清楚是不是一定要用ssh协议访问, 没试过http行不行...), 并按需执行git指令即可
 
 ### Github 仓库提交
-显然, 1)在Git账户下添加当前机器生成的SSH公钥, 2)使用ssh协议(.git后缀)访问远程仓库, 能够克服Github仓库网络连接的问题
-同时, 经过测试, 仅使用命令`ssh-keygen`生成的公钥也是能行的, 不用一定加上`-C 邮箱`的
+1. 显然, 1)在Git账户下添加当前机器生成的SSH公钥, 2)使用ssh协议(.git后缀)访问远程仓库, 能够克服Github仓库网络连接的问题
+2. 同时, 经过测试, 仅使用命令`ssh-keygen`生成的公钥也是能行的, 不用一定加上`-C 邮箱`的
