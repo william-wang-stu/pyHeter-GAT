@@ -29,7 +29,7 @@ logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimesta
 
 def load_dataset(args, g):
     ut_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
-    hadjs, feats = extend_wholegraph(g=g, ut_mp=ut_mp, tweet_per_user=args.tweet_per_user)
+    hadjs, feats = extend_wholegraph(g=g, ut_mp=ut_mp, stage=args.stage, tweet_per_user=args.tweet_per_user)
     feature_dim = feats.shape[1]
     num_user = g.vcount()
     hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
@@ -143,8 +143,10 @@ torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
-g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_subgraph.p")) # Total 44896 User Nodes
-df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_df.p"))
+# g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_subgraph.p")) # Total 44896 User Nodes
+# df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_df.p"))
+g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subg_dp_20_100_ratio_35_20_2.p")) # Total 44896 User Nodes
+df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subdf_dp_20_100_ratio_35_20_2.p"))
 df = unique_cascades(df)
 df = {hashtag:cascades for hashtag,cascades in df.items() if len(cascades)>=args.min_influence}
 hadjs, feats, feature_dim, n_user = load_dataset(args, g)
@@ -156,7 +158,7 @@ if args.cuda:
     hadjs = [hadj.to(args.gpu) for hadj in hadjs]
     feats = feats.to(args.gpu)
 
-tensorboard_log_dir = 'tensorboard/tensorboard_%s_stage%d_epochs%d_lr%f_mininf%d' % (args.tensorboard_log, args.stage, args.epochs, args.lr, args.min_influence)
+tensorboard_log_dir = 'tensorboard/tensorboard_%s_stage%d_epochs%d_lr%f_mininf%d_t%d' % (args.tensorboard_log, args.stage, args.epochs, args.lr, args.min_influence, args.tweet_per_user)
 os.makedirs(tensorboard_log_dir, exist_ok=True)
 shutil.rmtree(tensorboard_log_dir)
 writer = SummaryWriter(tensorboard_log_dir)
@@ -205,7 +207,7 @@ def use_best_thr(best_thr, y_pred, y_score):
 def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
     model.eval()
 
-    loss, total, prec, rec, f1 = 0., 0., 0., 0., 0.
+    loss, correct, total, prec, rec, f1 = 0., 0., 0., 0., 0., 0.
     y_true, y_pred, y_score, thrs = [], [], [], {}
     for hashtag in sorted(selected_tags):
         labels, val_mask, test_mask, class_weight = labels_mp[hashtag], val_mask_mp[hashtag], test_mask_mp[hashtag], class_weight_mp[hashtag]
@@ -217,22 +219,25 @@ def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
         
         if best_thrs is None: # valid
             loss_batch = F.nll_loss(output[val_mask], labels[val_mask], class_weight)
-            y_true_cur  = labels[val_mask].data.tolist()
-            y_true  += y_true_cur
-            y_pred  += output[val_mask].max(1)[1].data.tolist()
+            y_true_cur = labels[val_mask].data.tolist()
+            y_pred_cur = output[val_mask].max(1)[1].data.tolist()
+            y_true += y_true_cur
+            y_pred += y_pred_cur
             y_score_cur = output[val_mask][:, 1].data.tolist()
             y_score += y_score_cur
             thrs[hashtag] = get_best_thr(y_true_cur, y_score_cur)
             alpha = val_mask.sum().item()
         else: # test
             loss_batch = F.nll_loss(output[test_mask], labels[test_mask], class_weight)
-            y_true  += labels[test_mask].data.tolist()
-            y_pred_cur  = output[test_mask].max(1)[1].data.tolist()
-            y_pred  += y_pred_cur
+            y_true_cur = labels[test_mask].data.tolist()
+            y_pred_cur = output[test_mask].max(1)[1].data.tolist()
+            y_true += y_true_cur
+            y_pred += y_pred_cur
             y_score_cur = output[test_mask][:, 1].data.tolist()
             y_score += y_score_cur
             use_best_thr(best_thrs[hashtag], y_pred_cur, y_score_cur)
             alpha = test_mask.sum().item()
+        correct += alpha * np.sum(np.array(y_true_cur) == np.array(y_pred_cur))
         loss  += alpha * loss_batch.item()
         total += alpha
 
@@ -240,9 +245,10 @@ def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
 
     prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary")
     auc = roc_auc_score(y_true, y_score)
-    logger.info("%sloss: %.4f AUC: %.4f Prec: %.4f Rec: %.4f F1: %.4f", log_desc, loss / total, auc, prec, rec, f1)
+    logger.info("%sloss: %.4f Acc: %.4f AUC: %.4f Prec: %.4f Rec: %.4f F1: %.4f", log_desc, loss / total, correct / total, auc, prec, rec, f1)
     # tensorboard_logger.log_value(log_desc+'loss', loss / total, epoch+1)
     writer.add_scalar(log_desc+'loss', loss / total, epoch+1)
+    writer.add_scalar(log_desc+'acc', correct / total, epoch+1)
     writer.add_scalar(log_desc+'auc', auc, epoch+1)
     writer.add_scalar(log_desc+'prec', prec, epoch+1)
     writer.add_scalar(log_desc+'rec', rec, epoch+1)

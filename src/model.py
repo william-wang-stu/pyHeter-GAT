@@ -136,7 +136,7 @@ class BatchdenseGAT(nn.Module):
                 h = F.dropout(h, self.dropout, training=self.training)
         return F.log_softmax(h, dim=-1)
 
-class HeterdenseGAT(nn.Module):
+class BatchHeterdenseGAT(nn.Module):
     def __init__(
         self, n_user, pretrained_emb,
         nb_node_kinds=2, nb_classes=2, n_units=[25,64], n_heads=[3], d2=64,
@@ -211,6 +211,46 @@ class HeterdenseGAT(nn.Module):
             torch.cat((type_aware_emb, type_fusion_emb),dim=2).reshape(bs, self.n_user,-1), # (bs, Nu, |Rs|+1, D') -> (bs, Nu, (|Rs|+1)*D')
         ) #  (bs, Nu, nb_classes)
         return F.log_softmax(ret, dim=-1)
+
+class MultiHeadGraphAttention(nn.Module):
+    def __init__(self, n_head, f_in, f_out, attn_dropout, bias=True):
+        super(MultiHeadGraphAttention, self).__init__()
+        self.n_head = n_head
+        self.w = Parameter(torch.Tensor(n_head, f_in, f_out))
+        self.a_src = Parameter(torch.Tensor(n_head, f_out, 1))
+        self.a_dst = Parameter(torch.Tensor(n_head, f_out, 1))
+
+        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
+        self.softmax = nn.Softmax(dim=-1)
+        self.dropout = nn.Dropout(attn_dropout)
+
+        if bias:
+            self.bias = Parameter(torch.Tensor(f_out))
+            init.constant_(self.bias, 0)
+        else:
+            self.register_parameter('bias', None)
+
+        init.xavier_uniform_(self.w)
+        init.xavier_uniform_(self.a_src)
+        init.xavier_uniform_(self.a_dst)
+
+    def forward(self, h, adj):
+        n = h.size(0) # h is of size n x f_in
+        h_prime = torch.matmul(h.unsqueeze(0), self.w) #  n_head x n x f_out
+        attn_src = torch.bmm(h_prime, self.a_src) # n_head x n x 1
+        attn_dst = torch.bmm(h_prime, self.a_dst) # n_head x n x 1
+        attn = attn_src.expand(-1, -1, n) + attn_dst.expand(-1, -1, n).permute(0, 2, 1) # n_head x n x n
+
+        attn = self.leaky_relu(attn)
+        attn.data.masked_fill_(1 - adj, float("-inf"))
+        attn = self.softmax(attn) # n_head x n x n
+        attn = self.dropout(attn)
+        output = torch.bmm(attn, h_prime) # n_head x n x f_out
+
+        if self.bias is not None:
+            return output + self.bias
+        else:
+            return output
 
 class SpGATLayer(nn.Module):
     def __init__(self, n_head, f_in, f_out, attn_dropout, bias=False):
@@ -373,6 +413,74 @@ class HetersparseGAT(nn.Module):
                 else:
                     x = F.elu(x.reshape(n, -1)) # (n, n_head, f_out) -> (n, n_head*f_out)
                     x = F.dropout(x, self.dropout, training=self.training)
+            heter_embs.append(x[:self.n_user].unsqueeze(-2)) # (Nu, 1, f_out)
+        type_aware_emb = torch.cat(heter_embs, dim=-2) # (Nu, |Rs|, D')
+        type_fusion_emb = self.additive_attention(h[:self.n_user], type_aware_emb) # (Nu, 1, D')
+        ret = self.fc_layer(
+            torch.cat((type_aware_emb, type_fusion_emb),dim=1).reshape(self.n_user,-1), # (Nu, |Rs|+1, D') -> (Nu, (|Rs|+1)*D')
+        ) #  (Nu, nb_classes)
+        return F.log_softmax(ret, dim=-1)
+
+class HeterdenseGAT(nn.Module):
+    def __init__(
+        self, n_user, pretrained_embs,
+        nb_node_kinds=2, nb_classes=2, n_units=[25,64], n_heads=[3], d2=64,
+        attn_dropout=0.5, dropout=0.1, 
+        fine_tune=False, instance_normalization=True, use_embs=False
+    ) -> None:
+        super().__init__()
+
+        self.n_layer = len(n_units)-1
+        self.n_user = n_user
+        self.dropout = dropout
+
+        self.inst_norm = instance_normalization
+        self.use_embs = use_embs
+        self.n_embs = len(pretrained_embs)
+        for idx, pretrained_emb in enumerate(pretrained_embs):
+            emb = nn.Embedding(pretrained_emb.size(0), pretrained_emb.size(1))
+            emb.weight = nn.Parameter(pretrained_emb)
+            emb.weight.requires_grad = fine_tune
+            n_units[0] += pretrained_emb.size(1)
+            setattr(self, f"emb{idx}",  emb)
+            if self.inst_norm:
+                setattr(self, f"norm{idx}", nn.InstanceNorm1d(pretrained_emb.size(1), momentum=0.0, affine=True))
+
+        self.layer_stack = nn.ModuleList()
+        for _ in range(nb_node_kinds):
+            layer_stack = nn.ModuleList()
+            for i in range(self.n_layer):
+                f_in = n_units[i] * n_heads[i - 1] if i else n_units[i]
+                layer_stack.append(
+                    MultiHeadGraphAttention(n_head=n_heads[i], f_in=f_in, f_out=n_units[i+1], attn_dropout=attn_dropout)
+                )
+            self.layer_stack.append(layer_stack)
+        self.additive_attention = AdditiveAttention(d=n_units[0], d1=n_units[1], d2=n_units[1])
+        self.fc_layer = nn.Linear(in_features=n_units[1]*(nb_node_kinds+1), out_features=nb_classes)
+    
+    def forward(self, hadj: torch.Tensor, h: torch.Tensor, vertices=None):
+        if self.use_embs:
+            for idx in self.n_embs:
+                emb = getattr(self, f"emb{idx}")
+                emb = emb(vertices[:self.n_user])
+                if self.inst_norm:
+                    norm = getattr(self, f"norm{idx}")
+                    emb = norm(emb.transpose(0,1)).transpose(0,1)
+                emb = torch.cat((emb, torch.empty(vertices.shape[0]-emb.size(0), emb.size(1)).fill_(0).to(emb.device)), dim=0)# (n_, f_emb) -> (n, f_emb)
+                h = torch.cat((h, emb), dim=1)
+        
+        n = h.shape[0]
+        heter_embs = []
+        for heter_idx, layer_stack in enumerate(self.layer_stack):
+            x = h
+            for i, gat_layer in enumerate(layer_stack):
+                x = gat_layer(x, hadj[heter_idx]).transpose(0,1) # output: (n, n_head, f_out)
+                if i + 1 == self.n_layer:
+                    x = x.mean(dim=1) # (n, n_head, f_out) -> (n, f_out)
+                else:
+                    x = F.elu(x.reshape(n, -1)) # (n, n_head, f_out) -> (n, n_head*f_out)
+                    x = F.dropout(x, self.dropout, training=self.training)
+                logger.info(x.shape)
             heter_embs.append(x[:self.n_user].unsqueeze(-2)) # (Nu, 1, f_out)
         type_aware_emb = torch.cat(heter_embs, dim=-2) # (Nu, |Rs|, D')
         type_fusion_emb = self.additive_attention(h[:self.n_user], type_aware_emb) # (Nu, 1, D')

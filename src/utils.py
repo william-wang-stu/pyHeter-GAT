@@ -21,7 +21,7 @@ import copy
 import configparser
 
 config = configparser.ConfigParser()
-config.read('config.ini')
+config.read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'config.ini'))
 DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
 Ntimestage = int(config['DEFAULT']['Ntimestage'])
 
@@ -496,27 +496,44 @@ def reindex_graph(old_nodes:list, old_edges:list, add_self_loop:bool=True):
 
     return nodes, edges
 
+def build_meta_relation(relations, nb_users):
+    meta_relations = []
+    for relation in relations:
+        meta_relations.append(np.matmul(relation[:nb_users], relation[:nb_users].T))
+    return meta_relations
+
 def create_sparsemat_from_edgelist(edgelist, m, n):
     rows, cols = edgelist[:,0], edgelist[:,1]
     ones = np.ones(len(rows), np.uint8)
     mat = sparse.coo_matrix((ones, (rows, cols)), shape=(m, n))
     return mat.tocsr()
 
-def extend_wholegraph(g, ut_mp, tweet_per_user=20):
+def create_adjmat_from_edgelist(edgelist, size):
+    adjmat = [[0]*size for _ in range(size)]
+    for from_, to_ in edgelist:
+        adjmat[from_][to_] = 1
+    return np.array(adjmat, dtype=np.uint8)
+
+def extend_wholegraph(g, ut_mp, stage, tweet_per_user=20, sparse_graph=True):
     """
     功能: 在subg_deg483子图和ut_mp的基础上, 根据tweet_per_user参数重新生成hadjs和feats
+    参数: sparse_graph=False时, 返回的实际上是一同质图
     """
     user_nodes = g.vs["label"]
     # NOTE: ut_mp用的是utmp_groupbystage, 这里先不考虑stage直接用最后一个时间片的ut_mp关系
-    tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=ut_mp[-1], tweets_per_user=tweet_per_user, return_edges=True)
+    tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=ut_mp[stage], tweets_per_user=tweet_per_user, return_edges=True)
     tweet_nodes = list(tweet_nodes)
+    logger.info(f"{len(user_nodes)}, {len(tweet_nodes)}")
 
     # Users: 44896, Tweets: 10008103, Total: 10052999
     nodes, edges = reindex_graph([user_nodes, tweet_nodes], [g.get_edgelist(), ut_edges])
 
-    uu_mat = create_sparsemat_from_edgelist(np.array(edges[0]), len(nodes), len(nodes))
-    ut_mat = create_sparsemat_from_edgelist(np.array(edges[1]), len(nodes), len(nodes))
-    hadjs = [uu_mat, ut_mat]
+    if sparse_graph:
+        uu_mat = create_sparsemat_from_edgelist(np.array(edges[0]), len(nodes), len(nodes))
+        ut_mat = create_sparsemat_from_edgelist(np.array(edges[1]), len(nodes), len(nodes))
+        hadjs = [uu_mat, ut_mat]
+    else:
+        hadjs = build_meta_relation([create_adjmat_from_edgelist(edges[0], len(nodes)), create_adjmat_from_edgelist(edges[1], len(nodes))], nb_users=len(user_nodes))
 
     user_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
     deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), 208894)
@@ -524,8 +541,85 @@ def extend_wholegraph(g, ut_mp, tweet_per_user=20):
     user_feats = np.concatenate((user_features[user_nodes], deepwalk_feats[user_nodes]), axis=1) 
     tweet_feats = tweet_features[tweet_nodes]
 
-    feats = np.concatenate((
-        np.append(user_feats, np.zeros(shape=(user_feats.shape[0], tweet_feats.shape[1])),  axis=1), 
-        np.append(np.zeros(shape=(tweet_feats.shape[0], user_feats.shape[1])), tweet_feats, axis=1), 
-    ), axis=0)
+    if sparse_graph:
+        feats = np.concatenate((
+            np.append(user_feats, np.zeros(shape=(user_feats.shape[0], tweet_feats.shape[1])),  axis=1), 
+            np.append(np.zeros(shape=(tweet_feats.shape[0], user_feats.shape[1])), tweet_feats, axis=1), 
+        ), axis=0)
+    else:
+        feats = user_feats
     return hadjs, feats
+
+def unique_cascades(df):
+    unique_df = {}
+    for hashtag, cascades in df.items():
+        unique_cs, us = [], set()
+        for user, timestamp in cascades:
+            if user in us:
+                continue
+            us.add(user)
+            unique_cs.append((user,timestamp))
+        unique_df[hashtag] = unique_cs
+    return unique_df
+
+def gen_pos_neg_users(g, cascades, sample_ratio, stage):
+    pos_users, neg_users = set(), set()
+    all_activers = set([elem[0] for elem in cascades])
+    max_ts = cascades[0][1] + int((cascades[-1][1]-cascades[0][1]+Ntimestage-1)/Ntimestage) * (stage+1)
+    for user, ts in cascades:
+        if ts > max_ts:
+            break
+        # Add Pos Sample
+        pos_users.add(user)
+
+        # Choos Neg from Neighborhood
+        first_order_neighbor = list(set(g.neighborhood(user, order=1)) - all_activers)
+        if len(first_order_neighbor) > 0:
+            neg_user = random.choices(first_order_neighbor, k=min(len(first_order_neighbor), sample_ratio))
+            neg_users |= set(neg_user)
+        else:
+            second_order_neighbor = list(set(g.neighborhood(user, order=2)) - all_activers)
+            if len(second_order_neighbor) > 0:
+                neg_user = random.choices(second_order_neighbor, k=min(len(first_order_neighbor), sample_ratio))
+                neg_users |= set(neg_user)
+    # logger.info(f"pos={len(pos_users)}, neg={len(neg_users)}, diff={len(pos_users & neg_users)}")
+    return pos_users, neg_users
+
+def get_binary_mask(total_size, indices):
+    mask = torch.zeros(total_size)
+    mask[indices] = 1
+    return mask.byte()
+
+def load_labels(args, g, cascades):
+    pos_users, neg_users = gen_pos_neg_users(g=g, cascades=cascades, sample_ratio=args.sample_ratio, stage=args.stage)
+    num_user = g.vcount()
+
+    # NOTE: label=1表示正样本, label=-1表示负样本, label=0表示未被选择
+    labels = torch.zeros(num_user)
+    labels[list(pos_users)] =  1
+    labels[list(neg_users)] = -1
+
+    float_mask = np.zeros(len(labels))
+    for label in [-1,1]:
+        ids = np.where(labels == label)[0]
+        float_mask[ids] = np.random.permutation(np.linspace(1e-10,1,len(ids))) if args.shuffle else np.linspace(1e-10,1,len(ids))
+    
+    train_ids = np.where((float_mask>0) & (float_mask<=args.train_ratio/100))[0]
+    val_ids   = np.where((float_mask>args.train_ratio/100) & (float_mask<=(args.train_ratio+args.valid_ratio)/100))[0]
+    test_ids  = np.where(float_mask>(args.train_ratio+args.valid_ratio)/100)[0]
+    # logger.info(f"train/valid/test={len(train_ids)}/{len(val_ids)}/{len(test_ids)}")
+
+    train_mask = get_binary_mask(num_user, train_ids)
+    val_mask   = get_binary_mask(num_user, val_ids)
+    test_mask  = get_binary_mask(num_user, test_ids)
+    if hasattr(torch, 'BoolTensor'):
+        train_mask = train_mask.bool()
+        val_mask = val_mask.bool()
+        test_mask = test_mask.bool()
+    
+    pos_neg_labels = list(filter(lambda x: x==1 or x==-1, labels))
+    nb_classes = np.unique(pos_neg_labels).shape[0]
+    class_weight = torch.FloatTensor(len(pos_neg_labels) / (nb_classes*np.unique(pos_neg_labels, return_counts=True)[1])) if args.class_weight_balanced else torch.ones(nb_classes)
+    labels[labels==-1] = 0
+    
+    return labels.long(), train_mask, val_mask, test_mask, nb_classes, class_weight
