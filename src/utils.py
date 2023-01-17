@@ -19,8 +19,16 @@ from scipy import sparse
 from scipy.sparse import csr_matrix
 import copy
 import configparser
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib import colors
+from yellowbrick.cluster import KElbowVisualizer
+from sklearn.cluster import KMeans, AgglomerativeClustering, MiniBatchKMeans
+from sklearn.neighbors import NearestCentroid, KNeighborsClassifier
+from sklearn.decomposition import PCA
 
 config = configparser.ConfigParser()
+# NOTE: realpath(__file__)是在获取执行这段代码所属文件的绝对路径, 即~/pyHeter-GAT/src/utils.py
 config.read(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'config.ini'))
 DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
 Ntimestage = int(config['DEFAULT']['Ntimestage'])
@@ -538,7 +546,9 @@ def extend_wholegraph(g, ut_mp, stage, tweet_per_user=20, sparse_graph=True):
     user_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
     deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), 208894)
     tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/doc2topic_tweetfeat.p"))
-    user_feats = np.concatenate((user_features[user_nodes], deepwalk_feats[user_nodes]), axis=1) 
+    if not isinstance(tweet_features, np.ndarray):
+        tweet_features = np.array(tweet_features)
+    user_feats = np.concatenate((user_features[user_nodes], deepwalk_feats[user_nodes]), axis=1)
     tweet_feats = tweet_features[tweet_nodes]
 
     if sparse_graph:
@@ -623,3 +633,68 @@ def load_labels(args, g, cascades):
     labels[labels==-1] = 0
     
     return labels.long(), train_mask, val_mask, test_mask, nb_classes, class_weight
+
+def get_centroids(X, y):
+    nb_kind = len(np.unique(y))
+    centers_ = []
+    for idx in range(nb_kind):
+        center = np.median(X[y==idx],axis=0)
+        centers_.append([elem for elem in center])
+    return np.array(centers_)
+
+def get_centroids2(X, y):
+    clf = NearestCentroid()
+    clf.fit(X, y)
+    centroids_ = clf.centroids_
+    return np.array([[elem for elem in center] for center in centroids_])
+
+def apply_clustering_algo(tweet_features, model='agg', todraw=False):
+    if not isinstance(tweet_features, np.ndarray):
+        tweet_features = np.array(tweet_features)
+    
+    if todraw:
+        # Reduce Dimensions for plotting
+        pca_ = PCA(n_components=3)
+        tweet_features = pca_.fit_transform(tweet_features)
+    
+    # 1. sample a fraction of tweets for clustering and training cluster-classifier
+    frac = 1e-3
+    train_tweets = random.choices(tweet_features, k=int(len(tweet_features)*frac))
+    train_tweets_df = pd.DataFrame(train_tweets)
+
+    # 2. determine the K
+    elbow_ = KElbowVisualizer(KMeans(), k=20)
+    elbow_.fit(train_tweets_df)
+    n_clusters = elbow_.elbow_value_
+    
+    # 3. perform clustering
+    if model == 'agg':
+        model_ = AgglomerativeClustering(n_clusters=n_clusters)
+        labels_ = model_.fit_predict(train_tweets_df).astype("int")
+        # 3.1 get centroids
+        centroids = get_centroids2(X=train_tweets_df, y=labels_)
+        # 3.2 train classifier and give labels to other test data
+        knnmodel_ = KNeighborsClassifier(n_neighbors=1)
+        knnmodel_.fit(train_tweets_df, labels_)
+        whole_labels_ = knnmodel_.predict(tweet_features)
+    elif model == 'mbk':
+        model_ = MiniBatchKMeans(n_clusters=n_clusters, random_state=2023)
+        # 3.1 get centroids
+        centroids = model_.cluster_centers_
+        # 3.2 train classifier and give labels to other test data
+        whole_labels_ = model_.fit_predict(tweet_features).astype("int")
+
+    # 4. plot
+    if todraw:
+        fig = plt.figure(figsize=(10,8))
+        ax = fig.add_subplot(111, projection="3d", label="bla", computed_zorder=False)
+        cmap = colors.ListedColormap(["#682F2F", "#9E726F", "#D6B2B1", "#B9C0C9", "#9F8A78", "#F3AB60"])
+        ax.scatter(train_tweets_df[0], train_tweets_df[1], train_tweets_df[2], c=labels_, marker=".", cmap=cmap, zorder=0)
+        ax.scatter(centroids[:,0],centroids[:,1],centroids[:,2], c='red', marker="o", s=100)
+        plt.show()
+    
+    # NOTE: should return labels for constructing new user-tweet relationships
+    # Solution: if using agg-clustering, 0. sample fraction data, 1. fit_transform, 2. use X and y to train a knn-classifier(k=1), 3. use classifier to predict other data;
+    # if using mbk, 0. sample fraction data, 1. fit_transform, 2. predict other data
+
+    return centroids, whole_labels_
