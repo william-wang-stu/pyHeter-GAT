@@ -648,7 +648,12 @@ def get_centroids2(X, y):
     centroids_ = clf.centroids_
     return np.array([[elem for elem in center] for center in centroids_])
 
-def apply_clustering_algo(tweet_features, model='agg', todraw=False):
+def apply_clustering_algo(tweet_features, model:str='agg', todraw=False):
+    centroids_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/{model}_centroids_.pkl")
+    labels_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/{model}_labels_.pkl")
+    if os.path.exists(centroids_filepath) and os.path.exists(labels_filepath):
+        return load_pickle(centroids_filepath), load_pickle(labels_filepath)
+
     if not isinstance(tweet_features, np.ndarray):
         tweet_features = np.array(tweet_features)
     
@@ -661,11 +666,13 @@ def apply_clustering_algo(tweet_features, model='agg', todraw=False):
     frac = 1e-3
     train_tweets = random.choices(tweet_features, k=int(len(tweet_features)*frac))
     train_tweets_df = pd.DataFrame(train_tweets)
+    logger.info("--Finish Sampling Tweets--")
 
     # 2. determine the K
     elbow_ = KElbowVisualizer(KMeans(), k=20)
     elbow_.fit(train_tweets_df)
     n_clusters = elbow_.elbow_value_
+    logger.info(f"--Finish Determining K={n_clusters}--")
     
     # 3. perform clustering
     if model == 'agg':
@@ -673,16 +680,21 @@ def apply_clustering_algo(tweet_features, model='agg', todraw=False):
         labels_ = model_.fit_predict(train_tweets_df).astype("int")
         # 3.1 get centroids
         centroids = get_centroids2(X=train_tweets_df, y=labels_)
+        logger.info(f"--Finish Calculating {model.capitalize()} Centroids--")
         # 3.2 train classifier and give labels to other test data
         knnmodel_ = KNeighborsClassifier(n_neighbors=1)
         knnmodel_.fit(train_tweets_df, labels_)
         whole_labels_ = knnmodel_.predict(tweet_features)
+        logger.info(f"--Finish Training KNNModel and Calculating {model.capitalize()} Labels--")
     elif model == 'mbk':
         model_ = MiniBatchKMeans(n_clusters=n_clusters, random_state=2023)
+        # 3.2 train classifier and give labels to all data
+        whole_labels_ = model_.fit_predict(tweet_features).astype("int")
         # 3.1 get centroids
         centroids = model_.cluster_centers_
-        # 3.2 train classifier and give labels to other test data
-        whole_labels_ = model_.fit_predict(tweet_features).astype("int")
+        logger.info(f"--Finish Calculating {model.capitalize()} Labels and Centroids--")
+    save_pickle(centroids, centroids_filepath)
+    save_pickle(whole_labels_, labels_filepath)
 
     # 4. plot
     if todraw:
@@ -693,8 +705,60 @@ def apply_clustering_algo(tweet_features, model='agg', todraw=False):
         ax.scatter(centroids[:,0],centroids[:,1],centroids[:,2], c='red', marker="o", s=100)
         plt.show()
     
-    # NOTE: should return labels for constructing new user-tweet relationships
-    # Solution: if using agg-clustering, 0. sample fraction data, 1. fit_transform, 2. use X and y to train a knn-classifier(k=1), 3. use classifier to predict other data;
-    # if using mbk, 0. sample fraction data, 1. fit_transform, 2. predict other data
-
     return centroids, whole_labels_
+
+def get_tweet_feat_for_user_nodes(lda_model_k=25):
+    twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/lda-model/twft_per_user.pkl")
+    if os.path.exists(twft_filepath):
+        logger.info(f"Trying to Get Twft in path:{twft_filepath}...Success")
+        return load_pickle(twft_filepath)
+    
+    twft = []
+    prefix, suffix = os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model"), f"_k{lda_model_k}_maxiter{50}"
+    logger.info(f"Calculating Twft Using CountVectorizer/LDAModel/ProcessedUserTexts in path:{prefix}/.../{suffix}")
+    for part in range(1,11):
+        cv_ = load_pickle(f"{prefix}/cv/cv_0{part}{suffix}.p")
+        lda_model_ = load_pickle(f"{prefix}/model/model_0{part}{suffix}.p")
+        user_texts_l = load_pickle(f"{prefix}/processedtexts-per-user/ProcessedTexts_{part}.p")
+
+        twft.extend(lda_model_.transform(cv_.transform(user_texts_l)))
+    save_pickle(twft, twft_filepath)
+    return twft
+
+def tweet_centralized_process(stage=Ntimestage-1, clustering_algo='mbk'):
+    # 1. prepare tweet feature
+    homo_g = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subg_dp_20_100_ratio_35_20_2.p")) # Total 44896 User Nodes
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/doc2topic_tweetfeat.p"))
+    if isinstance(stage, int) and 0<=stage<=7:
+        user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
+        user_tweet_mp = user_tweet_mp[stage]
+    else:
+        user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+
+    # 2. apply clustering algo
+    centroids_, tw2centroids_ = apply_clustering_algo(tweet_features, model=clustering_algo)
+
+    # replace user_tweet_edges with user_tweet_centroid_edges
+    user_nodes = homo_g.vs["label"]
+    user_tweet_centroid_edges = []
+    for user in user_nodes:
+        for tweet in user_tweet_mp[user]:
+            user_tweet_centroid_edges.append((user, tw2centroids_[tweet]))
+
+    # 3. build new homo graph
+    tweet_nodes = [elem for elem in range(len(centroids_))]
+    uu_edges = homo_g.get_edgelist()
+    logger.info(f"Graph Info: nb-users={len(user_nodes)}, nb-tweets={len(tweet_nodes)}, nb-uu-edges={len(uu_edges)}, nb-ut-edges={len(user_tweet_centroid_edges)}")
+    nodes, edges = reindex_graph([user_nodes, tweet_nodes], [uu_edges, user_tweet_centroid_edges])
+    fulledges = []
+    for monoedges in edges:
+        fulledges.extend(monoedges)
+
+    # 4. get node features for both users and tweets
+    twft_for_users  = get_tweet_feat_for_user_nodes(lda_model_k=25)
+    feats = []
+    feats.extend(list(np.array(twft_for_users)[user_nodes]))
+    feats.extend(centroids_) # twft_for_tweets
+    logger.info(f"New Homo Graph Info: nb-nodes={len(nodes)}, nb-edges={len(fulledges)}, nb-tweets={len(feats)}*{len(feats[0])}")
+
+    return nodes, fulledges, feats
