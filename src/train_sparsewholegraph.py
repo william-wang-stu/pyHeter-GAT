@@ -5,6 +5,10 @@
     P.S. 注意此时子网大小为50Users+50*30Tweets=1550
 2. 网路
 3. 训练测试
+
+新:
+1. 以用户为中心的图注意力网络
+2. 以推文为中心的图注意力网络
 """
 import sys
 import os
@@ -12,7 +16,7 @@ sys.path.append(os.path.dirname(os.getcwd()))
 
 from lib.utils import get_sparse_tensor
 from lib.log import logger
-from utils import extend_wholegraph, EarlyStopping, load_pickle, save_pickle, DATA_ROOTPATH, Ntimestage
+from utils import extend_wholegraph, gen_pos_neg_users, gen_pos_neg_users2, get_binary_mask, unique_cascades, EarlyStopping, load_pickle, save_pickle, DATA_ROOTPATH, Ntimestage
 from model import HetersparseGAT
 import numpy as np
 import argparse
@@ -27,65 +31,22 @@ from torch.utils.tensorboard import SummaryWriter
 
 logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
 
-def load_dataset(args, g):
-    ut_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
-    hadjs, feats = extend_wholegraph(g=g, ut_mp=ut_mp, stage=args.stage, tweet_per_user=args.tweet_per_user)
-    feature_dim = feats.shape[1]
-    num_user = g.vcount()
-    hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
-    feats = torch.FloatTensor(feats)
-    return hadjs, feats, feature_dim, num_user
-
-def unique_cascades(df):
-    unique_df = {}
-    for hashtag, cascades in df.items():
-        unique_cs, us = [], set()
-        for user, timestamp in cascades:
-            if user in us:
-                continue
-            us.add(user)
-            unique_cs.append((user,timestamp))
-        unique_df[hashtag] = unique_cs
-    return unique_df
-
-def gen_pos_neg_users(g, cascades, sample_ratio, stage):
-    pos_users, neg_users = set(), set()
-    all_activers = set([elem[0] for elem in cascades])
-    max_ts = cascades[0][1] + int((cascades[-1][1]-cascades[0][1]+Ntimestage-1)/Ntimestage) * (stage+1)
-    for user, ts in cascades:
-        if ts > max_ts:
-            break
-        # Add Pos Sample
-        pos_users.add(user)
-
-        # Choos Neg from Neighborhood
-        first_order_neighbor = list(set(g.neighborhood(user, order=1)) - all_activers)
-        if len(first_order_neighbor) > 0:
-            neg_user = random.choices(first_order_neighbor, k=min(len(first_order_neighbor), sample_ratio))
-            neg_users |= set(neg_user)
-        else:
-            second_order_neighbor = list(set(g.neighborhood(user, order=2)) - all_activers)
-            if len(second_order_neighbor) > 0:
-                neg_user = random.choices(second_order_neighbor, k=min(len(first_order_neighbor), sample_ratio))
-                neg_users |= set(neg_user)
-    # logger.info(f"pos={len(pos_users)}, neg={len(neg_users)}, diff={len(pos_users & neg_users)}")
-    return pos_users, neg_users
-
-def get_binary_mask(total_size, indices):
-    mask = torch.zeros(total_size)
-    mask[indices] = 1
-    return mask.byte()
-
 def load_labels(args, g, cascades):
-    pos_users, neg_users = gen_pos_neg_users(g=g, cascades=cascades, sample_ratio=args.sample_ratio, stage=args.stage)
-    num_user = g.vcount()
+    """
+    功能: 生成训练测试用的正负样本标签
+    """
+    # 1. 根据传播级联cascades生成正负样本, 且生成负样本时会做正负样本均衡
+    # pos_users, neg_users = gen_pos_neg_users(g=g, cascades=cascades, sample_ratio=args.sample_ratio, stage=args.stage)
+    max_ts = cascades[0][1] + int((cascades[-1][1]-cascades[0][1]+Ntimestage-1)/Ntimestage) * (args.stage+1)
+    pos_users, neg_users = gen_pos_neg_users2(g=g, cascades=[elem for elem in cascades if elem[1]<=max_ts], sample_ratio=args.sample_ratio)
 
-    # NOTE: label=1表示正样本, label=-1表示负样本, label=0表示未被选择
+    # 2. 划分训练测试验证集
+    num_user = g.vcount()
     labels = torch.zeros(num_user)
+    float_mask = np.zeros(num_user)
+
     labels[list(pos_users)] =  1
     labels[list(neg_users)] = -1
-
-    float_mask = np.zeros(len(labels))
     for label in [-1,1]:
         ids = np.where(labels == label)[0]
         float_mask[ids] = np.random.permutation(np.linspace(1e-10,1,len(ids))) if args.shuffle else np.linspace(1e-10,1,len(ids))
@@ -103,10 +64,11 @@ def load_labels(args, g, cascades):
         val_mask = val_mask.bool()
         test_mask = test_mask.bool()
     
+    # 3. 计算NLL Loss中所需的class_weight
     pos_neg_labels = list(filter(lambda x: x==1 or x==-1, labels))
     nb_classes = np.unique(pos_neg_labels).shape[0]
     class_weight = torch.FloatTensor(len(pos_neg_labels) / (nb_classes*np.unique(pos_neg_labels, return_counts=True)[1])) if args.class_weight_balanced else torch.ones(nb_classes)
-    labels[labels==-1] = 0
+    labels[labels==-1] = 0 # 置负样本标签为0而非-1
     
     return labels.long(), train_mask, val_mask, test_mask, nb_classes, class_weight
 
@@ -115,23 +77,24 @@ parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of 
 parser.add_argument('--model', type=str, default='hetersparsegat', help="available options are ['hetersparsegat']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
-parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train.')
+parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
 parser.add_argument('--lr', type=float, default=3e-3, help='Initial learning rate.')
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
-# parser.add_argument('--patience', type=int, default=5, help='Patience for EarlyStopping')
-parser.add_argument('--min-influence', type=int, default=100, help='Min Influence Length')
 parser.add_argument('--attn-dropout', type=float, default=0.1, help='Attn Dropout rate (1 - keep probability).')
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
+# parser.add_argument('--patience', type=int, default=5, help='Patience for EarlyStopping')
+parser.add_argument('--stage', type=int, default=Ntimestage-1, help="Time Stage (0~Ntimestage-1)")
+parser.add_argument('--min-influence', type=int, default=100, help='Min Influence Length')
 parser.add_argument('--tweet-per-user', type=int, default=10, help="Tweets Per User (20, 40, 100)")
 parser.add_argument('--sample-ratio', type=int, default=1, help="Sampling Ratio (1~inf)")
-parser.add_argument('--stage', type=int, default=Ntimestage-1, help="Time Stage (0~Ntimestage-1)")
 parser.add_argument('--selected-tags', type=str, default="all", help="Agg On Some Part of Hastags")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
 parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
+parser.add_argument('--sota-test', action='store_true', default=True, help="Use Prepared Sota-Test-Dataset if set true")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
 
 args = parser.parse_args()
@@ -143,46 +106,53 @@ torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
-# g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_subgraph.p")) # Total 44896 User Nodes
-# df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_df.p"))
-g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subg_dp_20_100_ratio_35_20_2.p")) # Total 44896 User Nodes
-df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subdf_dp_20_100_ratio_35_20_2.p"))
-df = unique_cascades(df)
-df = {hashtag:cascades for hashtag,cascades in df.items() if len(cascades)>=args.min_influence}
-hadjs, feats, feature_dim, n_user = load_dataset(args, g)
-n_units = [feature_dim]+[int(x) for x in args.hidden_units.strip().split(",")]
-n_heads = [int(x) for x in args.heads.strip().split(",")]
-logger.info(f"hadjs=[{len(hadjs)},{hadjs[0].shape}], feats={feats.shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
+# Stage: Data Preparation
+if not args.sota_test:
+    g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_subgraph.p")) # Total 44896 User Nodes
+    df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_df.p"))
+else:
+    # Sota-Test uses a down-sampled version of normal dataset, and corresponding down-sample-ratio is clarified in its filename
+    g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subg_dp_20_100_ratio_35_20_2.p"))
+    df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subdf_dp_20_100_ratio_35_20_2.p"))
+ut_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
 
-if args.cuda:
-    hadjs = [hadj.to(args.gpu) for hadj in hadjs]
-    feats = feats.to(args.gpu)
-
+# tensorboard-logger Preparation
 tensorboard_log_dir = 'tensorboard/tensorboard_%s_stage%d_epochs%d_lr%f_mininf%d_t%d' % (args.tensorboard_log, args.stage, args.epochs, args.lr, args.min_influence, args.tweet_per_user)
 os.makedirs(tensorboard_log_dir, exist_ok=True)
 shutil.rmtree(tensorboard_log_dir)
 writer = SummaryWriter(tensorboard_log_dir)
 logger.info('tensorboard logging to %s', tensorboard_log_dir)
 
-if args.selected_tags == "all":
-    selected_tags = list(df.keys())
-else:
-    selected_tags = [int(x) for x in args.selected_tags.split(',')]
-logger.info(f"selected-tags len={len(selected_tags)}")
-selected_df = {hashtag: cascades for hashtag,cascades in df.items() if hashtag in selected_tags}
+# Stage: Data Processing
+df = unique_cascades(df) # remove duplicate appearances for single user in some particular hashtag
+df = {hashtag:cascades for hashtag,cascades in df.items() if len(cascades)>=args.min_influence} # remove some hashtags with too few user occurences
 
-# NOTE: memo labels and masks pre
 labels_mp, train_mask_mp, val_mask_mp, test_mask_mp, class_weight_mp = {}, {}, {}, {}, {}
-for hashtag, cascades in selected_df.items():
+selected_tags = list(df.keys()) if args.selected_tags == "all" else [int(x) for x in args.selected_tags.split(',')]
+for hashtag, cascades in df.items():
+    if hashtag not in selected_tags:
+        continue
     labels, train_mask, val_mask, test_mask, nb_classes, class_weight = load_labels(args=args, g=g, cascades=cascades)
     labels_mp[hashtag] = labels; train_mask_mp[hashtag] = train_mask; val_mask_mp[hashtag] = val_mask; test_mask_mp[hashtag] = test_mask; class_weight_mp[hashtag] = class_weight
-    logger.info(f"hashtag={hashtag:}, mask_len={train_mask.sum().item()}/{val_mask.sum().item()}/{test_mask.sum().item()}, nb_classes={nb_classes}, class_weight={class_weight[0]:.2f}:{class_weight[1]:.2f}")
+    logger.info(f"hashtag={hashtag}, mask_len={train_mask.sum().item()}/{val_mask.sum().item()}/{test_mask.sum().item()}, nb_classes={nb_classes}, class_weight={class_weight[0]:.2f}:{class_weight[1]:.2f}")
+
+# Stage: Model Preparation
+hadjs, feats = extend_wholegraph(g=g, ut_mp=ut_mp, stage=args.stage, tweet_per_user=args.tweet_per_user)
+hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
+feats = torch.FloatTensor(feats)
+
+n_user = g.vcount()
+n_units = [feats.shape[1]]+[int(x) for x in args.hidden_units.strip().split(",")]
+n_heads = [int(x) for x in args.heads.strip().split(",")]
+logger.info(f"hadjs={len(hadjs)}*{hadjs[0].shape}, feats={feats.shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
 
 if args.model == 'hetersparsegat':
     model = HetersparseGAT(n_user=n_user, nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, 
         attn_dropout=args.attn_dropout, dropout=args.dropout, use_pretrained_emb=False)
-# logger.info(f"model: {model}")
+
 if args.cuda:
+    hadjs = [hadj.to(args.gpu) for hadj in hadjs]
+    feats = feats.to(args.gpu)
     model.to(args.gpu)
 
 optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)

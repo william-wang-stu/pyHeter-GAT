@@ -372,7 +372,7 @@ def load_w2v_feature(file, max_idx=0):
             nu += 1
             if nu == 1:
                 n, d = int(content[0]), int(content[1])
-                logger.info(f"n={n}, d={d}")
+                # logger.info(f"n={n}, d={d}")
                 feature = [[0.] * d for i in range(max(n, max_idx + 1))]
                 continue
             index = int(content[0])
@@ -531,7 +531,7 @@ def extend_wholegraph(g, ut_mp, stage, tweet_per_user=20, sparse_graph=True):
     # NOTE: ut_mp用的是utmp_groupbystage, 这里先不考虑stage直接用最后一个时间片的ut_mp关系
     tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=ut_mp[stage], tweets_per_user=tweet_per_user, return_edges=True)
     tweet_nodes = list(tweet_nodes)
-    logger.info(f"{len(user_nodes)}, {len(tweet_nodes)}")
+    logger.info(f"nb_users={len(user_nodes)}, nb_tweets={len(tweet_nodes)}")
 
     # Users: 44896, Tweets: 10008103, Total: 10052999
     nodes, edges = reindex_graph([user_nodes, tweet_nodes], [g.get_edgelist(), ut_edges])
@@ -579,6 +579,26 @@ def gen_pos_neg_users(g, cascades, sample_ratio, stage):
     for user, ts in cascades:
         if ts > max_ts:
             break
+        # Add Pos Sample
+        pos_users.add(user)
+
+        # Choos Neg from Neighborhood
+        first_order_neighbor = list(set(g.neighborhood(user, order=1)) - all_activers)
+        if len(first_order_neighbor) > 0:
+            neg_user = random.choices(first_order_neighbor, k=min(len(first_order_neighbor), sample_ratio))
+            neg_users |= set(neg_user)
+        else:
+            second_order_neighbor = list(set(g.neighborhood(user, order=2)) - all_activers)
+            if len(second_order_neighbor) > 0:
+                neg_user = random.choices(second_order_neighbor, k=min(len(first_order_neighbor), sample_ratio))
+                neg_users |= set(neg_user)
+    # logger.info(f"pos={len(pos_users)}, neg={len(neg_users)}, diff={len(pos_users & neg_users)}")
+    return pos_users, neg_users
+
+def gen_pos_neg_users2(g, cascades, sample_ratio):
+    pos_users, neg_users = set(), set()
+    all_activers = set([elem[0] for elem in cascades])
+    for user, _ in cascades:
         # Add Pos Sample
         pos_users.add(user)
 
