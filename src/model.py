@@ -245,7 +245,7 @@ class MultiHeadGraphAttention(nn.Module):
         attn.data.masked_fill_(1 - adj, float("-inf"))
         attn = self.softmax(attn) # n_head x n x n
         attn = self.dropout(attn)
-        output = torch.bmm(attn, h_prime) # n_head x n x f_out
+        output = torch.bmm(attn, h_prime).transpose(0,1) # n x n_head x f_out
 
         if self.bias is not None:
             return output + self.bias
@@ -487,4 +487,66 @@ class HeterdenseGAT(nn.Module):
         ret = self.fc_layer(
             torch.cat((type_aware_emb, type_fusion_emb),dim=1).reshape(self.n_user,-1), # (Nu, |Rs|+1, D') -> (Nu, (|Rs|+1)*D')
         ) #  (Nu, nb_classes)
+        return F.log_softmax(ret, dim=-1)
+
+class HyperGraphAttentionNetwork(nn.Module):
+    def __init__(
+        self, n_user, heter_vecspace_dims, nb_classes,
+        n_units, n_heads, attn_dropout, dropout,
+        instance_normalization=True
+    ) -> None:
+        super().__init__()
+
+        self.n_layer = len(n_units)
+        self.n_user = n_user
+        self.dropout = dropout
+        f_user, f_tweet = heter_vecspace_dims
+        self.heter_vecspace_dims = heter_vecspace_dims
+
+        # TODO: add normalization code for feats
+        # self.inst_norm = instance_normalization
+        # if self.inst_norm:
+        #     for vec_idx, vecspace_dim in enumerate(heter_vecspace_dims):
+        #         setattr(self, f"norm-{vec_idx}", nn.InstanceNorm1d(vecspace_dim, momentum=0.0, affine=True))
+
+        # NOTE: User-Centralized & Tweet-Centralized GAT-Network
+        self._build_layer_stack(extend_units=[f_user]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, desc="user")
+        self._build_layer_stack(extend_units=[f_tweet]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, desc="tweet")
+        self.fc_layer = nn.Linear(in_features=n_units[-1]*2, out_features=nb_classes)
+    
+    def _build_layer_stack(self, extend_units, n_heads, attn_dropout, desc):
+        attrname = f"layerstack-{desc}"
+        layer_stack = nn.ModuleList()
+        for layer_idx in range(self.n_layer):
+            f_in = extend_units[layer_idx] * n_heads[layer_idx-1] if layer_idx else extend_units[layer_idx]
+            layer_stack.append(
+                # MultiHeadGraphAttention(n_head=n_heads[layer_idx], f_in=f_in, f_out=extend_units[layer_idx+1], attn_dropout=attn_dropout),
+                SpGATLayer(n_head=n_heads[layer_idx], f_in=f_in, f_out=extend_units[layer_idx+1], attn_dropout=attn_dropout),
+            )
+        setattr(self, attrname, layer_stack)
+    
+    def forward(self, hadjs: list[torch.Tensor], hembs: list[torch.Tensor]):
+        # TODO: add normalization code for feats
+        # if self.inst_norm:
+        #     for vec_idx, _ in enumerate(self.heter_vecspace_dims):
+        #         norm = getattr(self, f"norm-{vec_idx}")
+        #         h_embs[vec_idx] = norm(h_embs[vec_idx].transpose(0,1)).transpose(0,1)
+        # logger.info(f"{hadjs[0].device}, {hadjs[1].device}, {hembs[0].device}, {hembs[1].device}")
+
+        ret = []
+        for idx, name in enumerate(['user', 'tweet']):
+            attrname = f"layerstack-{name}"
+            layer_stack = getattr(self, attrname)
+            emb, adj = hembs[idx], hadjs[idx]
+            n = emb.shape[0]
+            for layer_idx, gat_layer in enumerate(layer_stack):
+                emb = gat_layer(emb, adj) # (n, n_head, f_out)
+                if layer_idx+1 == self.n_layer:
+                    emb = emb.mean(dim=1) # (n, n_head, f_out) -> (n, f_out)
+                else:
+                    emb = F.elu(emb.reshape(n, -1)) # (n, n_head, f_out) -> (n, n_head*f_out)
+                    emb = F.dropout(emb, self.dropout, training=self.training)
+            ret.append(emb[:self.n_user,:]) # (n, f_out) -> (n_user, f_out)
+        ret = torch.cat(ret, dim=-1) # (n_user, f_out)*2 -> (n_user, f_out*2)
+        ret = self.fc_layer(ret) # (n_user, nb_classes)
         return F.log_softmax(ret, dim=-1)

@@ -16,8 +16,8 @@ sys.path.append(os.path.dirname(os.getcwd()))
 
 from lib.utils import get_sparse_tensor
 from lib.log import logger
-from utils import extend_wholegraph, gen_pos_neg_users, gen_pos_neg_users2, get_binary_mask, unique_cascades, EarlyStopping, load_pickle, save_pickle, DATA_ROOTPATH, Ntimestage
-from model import HetersparseGAT
+from utils import *
+from model import HetersparseGAT, HyperGraphAttentionNetwork
 import numpy as np
 import argparse
 import shutil
@@ -74,7 +74,7 @@ def load_labels(args, g, cascades):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--model', type=str, default='hetersparsegat', help="available options are ['hetersparsegat']")
+parser.add_argument('--model', type=str, default='hypergat', help="available options are ['hetersparsegat','hypergat']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
 parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
@@ -114,7 +114,21 @@ else:
     # Sota-Test uses a down-sampled version of normal dataset, and corresponding down-sample-ratio is clarified in its filename
     g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subg_dp_20_100_ratio_35_20_2.p"))
     df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subdf_dp_20_100_ratio_35_20_2.p"))
-ut_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
+user_nodes = g.vs["label"]
+
+if isinstance(args.stage, int) and 0<=args.stage<=7:
+    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
+    user_tweet_mp = user_tweet_mp[args.stage]
+else:
+    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+
+structural_temporal_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
+deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), 208894)
+user_features = np.concatenate((structural_temporal_feats[user_nodes], deepwalk_feats[user_nodes]), axis=1)
+tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
+if not isinstance(tweet_features, np.ndarray):
+    tweet_features = np.array(tweet_features)
+logger.info(f"user-feats dim={user_features.shape[1]}, tweet-feats dim={tweet_features.shape[1]}")
 
 # tensorboard-logger Preparation
 tensorboard_log_dir = 'tensorboard/tensorboard_%s_stage%d_epochs%d_lr%f_mininf%d_t%d' % (args.tensorboard_log, args.stage, args.epochs, args.lr, args.min_influence, args.tweet_per_user)
@@ -137,23 +151,39 @@ for hashtag, cascades in df.items():
     logger.info(f"hashtag={hashtag}, mask_len={train_mask.sum().item()}/{val_mask.sum().item()}/{test_mask.sum().item()}, nb_classes={nb_classes}, class_weight={class_weight[0]:.2f}:{class_weight[1]:.2f}")
 
 # Stage: Model Preparation
-hadjs, feats = extend_wholegraph(g=g, ut_mp=ut_mp, stage=args.stage, tweet_per_user=args.tweet_per_user)
-hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
-feats = torch.FloatTensor(feats)
-
 n_user = g.vcount()
-n_units = [feats.shape[1]]+[int(x) for x in args.hidden_units.strip().split(",")]
+n_units = [int(x) for x in args.hidden_units.strip().split(",")]
 n_heads = [int(x) for x in args.heads.strip().split(",")]
-logger.info(f"hadjs={len(hadjs)}*{hadjs[0].shape}, feats={feats.shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
 
 if args.model == 'hetersparsegat':
-    model = HetersparseGAT(n_user=n_user, nb_node_kinds=2, nb_classes=nb_classes, n_units=n_units, n_heads=n_heads, 
+    hadjs, feats = extend_wholegraph(g=g, ut_mp=user_tweet_mp, initial_feats=[user_features, tweet_features], tweet_per_user=args.tweet_per_user)
+    hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
+    feats = torch.FloatTensor(feats)
+    model = HetersparseGAT(n_user=n_user, nb_node_kinds=2, nb_classes=nb_classes, n_units=[feats.shape[1]]+n_units, n_heads=n_heads, 
         attn_dropout=args.attn_dropout, dropout=args.dropout, use_pretrained_emb=False)
+    logger.info(f"hadjs={len(hadjs)}*{hadjs[0].shape}, feats={feats.shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
 
-if args.cuda:
-    hadjs = [hadj.to(args.gpu) for hadj in hadjs]
-    feats = feats.to(args.gpu)
-    model.to(args.gpu)
+    if args.cuda:
+        hadjs = [hadj.to(args.gpu) for hadj in hadjs]
+        feats = feats.to(args.gpu)
+        model.to(args.gpu)
+
+elif args.model == 'hypergat':
+    tw_nodes, tw_edges, tw_feats = tweet_centralized_process(homo_g=g, user_tweet_mp=user_tweet_mp, tweet_features=tweet_features, clustering_algo='mbk')
+    hadjs = [
+        create_sparsemat_from_edgelist(edgelist=g.get_edgelist(), m=n_user, n=n_user),
+        create_sparsemat_from_edgelist(edgelist=tw_edges, m=len(tw_nodes), n=len(tw_nodes)),
+    ]
+    hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
+    hembs = [torch.FloatTensor(user_features), torch.FloatTensor(tw_feats),]
+    model = HyperGraphAttentionNetwork(n_user=n_user, heter_vecspace_dims=[user_features.shape[1], tw_feats.shape[1]], nb_classes=nb_classes, 
+        n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout, instance_normalization=False)
+    logger.info(f"hadjs={len(hadjs)}*{hadjs[0].shape}, feats={hembs[0].shape}:{hembs[1].shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
+
+    if args.cuda:
+        hadjs = [hadj.to(args.gpu) for hadj in hadjs]
+        hembs = [hemb.to(args.gpu) for hemb in hembs]
+        model.to(args.gpu)
 
 optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 # stopper = EarlyStopping(patience=args.patience)
@@ -186,6 +216,8 @@ def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
         
         if args.model == 'hetersparsegat':
             output = model(hadjs, feats)
+        elif args.model == 'hypergat':
+            output = model(hadjs, hembs)
         
         if best_thrs is None: # valid
             loss_batch = F.nll_loss(output[val_mask], labels[val_mask], class_weight)
@@ -240,6 +272,8 @@ def train(epoch, log_desc='train_'):
         optimizer.zero_grad()
         if args.model == 'hetersparsegat':
             output = model(hadjs, feats)
+        elif args.model == 'hypergat':
+            output = model(hadjs, hembs)
         loss_train = F.nll_loss(output[train_mask], labels[train_mask], class_weight)
         alpha = train_mask.sum().item()
         loss  += alpha * loss_train.item()

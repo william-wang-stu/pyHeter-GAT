@@ -26,6 +26,9 @@ from yellowbrick.cluster import KElbowVisualizer
 from sklearn.cluster import KMeans, AgglomerativeClustering, MiniBatchKMeans
 from sklearn.neighbors import NearestCentroid, KNeighborsClassifier
 from sklearn.decomposition import PCA
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+import pyLDAvis.sklearn
 
 config = configparser.ConfigParser()
 # NOTE: realpath(__file__)是在获取执行这段代码所属文件的绝对路径, 即~/pyHeter-GAT/src/utils.py
@@ -511,6 +514,8 @@ def build_meta_relation(relations, nb_users):
     return meta_relations
 
 def create_sparsemat_from_edgelist(edgelist, m, n):
+    if not isinstance(edgelist, np.ndarray):
+        edgelist = np.array(edgelist)
     rows, cols = edgelist[:,0], edgelist[:,1]
     ones = np.ones(len(rows), np.uint8)
     mat = sparse.coo_matrix((ones, (rows, cols)), shape=(m, n))
@@ -522,14 +527,13 @@ def create_adjmat_from_edgelist(edgelist, size):
         adjmat[from_][to_] = 1
     return np.array(adjmat, dtype=np.uint8)
 
-def extend_wholegraph(g, ut_mp, stage, tweet_per_user=20, sparse_graph=True):
+def extend_wholegraph(g, ut_mp, initial_feats, tweet_per_user=20, sparse_graph=True):
     """
     功能: 在subg_deg483子图和ut_mp的基础上, 根据tweet_per_user参数重新生成hadjs和feats
     参数: sparse_graph=False时, 返回的实际上是一同质图
     """
     user_nodes = g.vs["label"]
-    # NOTE: ut_mp用的是utmp_groupbystage, 这里先不考虑stage直接用最后一个时间片的ut_mp关系
-    tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=ut_mp[stage], tweets_per_user=tweet_per_user, return_edges=True)
+    tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=ut_mp, tweets_per_user=tweet_per_user, return_edges=True)
     tweet_nodes = list(tweet_nodes)
     logger.info(f"nb_users={len(user_nodes)}, nb_tweets={len(tweet_nodes)}")
 
@@ -537,19 +541,16 @@ def extend_wholegraph(g, ut_mp, stage, tweet_per_user=20, sparse_graph=True):
     nodes, edges = reindex_graph([user_nodes, tweet_nodes], [g.get_edgelist(), ut_edges])
 
     if sparse_graph:
-        uu_mat = create_sparsemat_from_edgelist(np.array(edges[0]), len(nodes), len(nodes))
-        ut_mat = create_sparsemat_from_edgelist(np.array(edges[1]), len(nodes), len(nodes))
+        uu_mat = create_sparsemat_from_edgelist(edges[0], len(nodes), len(nodes))
+        ut_mat = create_sparsemat_from_edgelist(edges[1], len(nodes), len(nodes))
         hadjs = [uu_mat, ut_mat]
     else:
         hadjs = build_meta_relation([create_adjmat_from_edgelist(edges[0], len(nodes)), create_adjmat_from_edgelist(edges[1], len(nodes))], nb_users=len(user_nodes))
 
-    user_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
-    deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), 208894)
-    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/doc2topic_tweetfeat.p"))
-    if not isinstance(tweet_features, np.ndarray):
-        tweet_features = np.array(tweet_features)
-    user_feats = np.concatenate((user_features[user_nodes], deepwalk_feats[user_nodes]), axis=1)
-    tweet_feats = tweet_features[tweet_nodes]
+    user_feats, tweet_feats = initial_feats
+    if len(user_feats) != len(user_nodes):
+        user_feats = user_feats[user_nodes]
+    tweet_feats = tweet_feats[tweet_nodes]
 
     if sparse_graph:
         feats = np.concatenate((
@@ -689,7 +690,7 @@ def apply_clustering_algo(tweet_features, model:str='agg', todraw=False):
     logger.info("--Finish Sampling Tweets--")
 
     # 2. determine the K
-    elbow_ = KElbowVisualizer(KMeans(), k=20)
+    elbow_ = KElbowVisualizer(MiniBatchKMeans(), k=(4,30))
     elbow_.fit(train_tweets_df)
     n_clusters = elbow_.elbow_value_
     logger.info(f"--Finish Determining K={n_clusters}--")
@@ -727,6 +728,22 @@ def apply_clustering_algo(tweet_features, model:str='agg', todraw=False):
     
     return centroids, whole_labels_
 
+def get_tweet_feat_for_tweet_nodes(lda_model_k=20):
+    processed_texts = load_pickle(f"")
+    cv = CountVectorizer(stop_words="english")
+    dtm = cv.fit_transform(processed_texts)
+    LDA_model = LatentDirichletAllocation(n_components=lda_model_k, max_iter=50, random_state=2023)
+    LDA_model.fit(dtm)
+    doc_topic = LDA_model.transform(dtm)
+
+    # save_pickle(cv,  f"cv/cv_0{texts_idx}_k{args.k}_maxiter50.p")
+    # save_pickle(dtm, f"dtm/dtm_0{texts_idx}_k{args.k}_maxiter50.p")
+    # save_pickle(doc_topic, f"doc2topic/doc_topic_0{texts_idx}_k{args.k}_maxiter50.p")
+    # save_pickle(LDA_model, f"model/model_0{texts_idx}_k{args.k}_maxiter50.p")
+
+    panel = pyLDAvis.sklearn.prepare(LDA_model, dtm, cv, mds='tsne') # Create the panel for the visualization
+    pyLDAvis.save_html(panel, 'LDA-vis.html') # TODO: filename
+
 def get_tweet_feat_for_user_nodes(lda_model_k=25):
     twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/lda-model/twft_per_user.pkl")
     if os.path.exists(twft_filepath):
@@ -745,15 +762,9 @@ def get_tweet_feat_for_user_nodes(lda_model_k=25):
     save_pickle(twft, twft_filepath)
     return twft
 
-def tweet_centralized_process(stage=Ntimestage-1, clustering_algo='mbk'):
+def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, clustering_algo='mbk'):
     # 1. prepare tweet feature
-    homo_g = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subg_dp_20_100_ratio_35_20_2.p")) # Total 44896 User Nodes
-    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/doc2topic_tweetfeat.p"))
-    if isinstance(stage, int) and 0<=stage<=7:
-        user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
-        user_tweet_mp = user_tweet_mp[stage]
-    else:
-        user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+    lda_k = tweet_features.shape[1]
 
     # 2. apply clustering algo
     centroids_, tw2centroids_ = apply_clustering_algo(tweet_features, model=clustering_algo)
@@ -775,10 +786,10 @@ def tweet_centralized_process(stage=Ntimestage-1, clustering_algo='mbk'):
         fulledges.extend(monoedges)
 
     # 4. get node features for both users and tweets
-    twft_for_users  = get_tweet_feat_for_user_nodes(lda_model_k=25)
+    twft_for_users  = get_tweet_feat_for_user_nodes(lda_model_k=lda_k)
     feats = []
     feats.extend(list(np.array(twft_for_users)[user_nodes]))
     feats.extend(centroids_) # twft_for_tweets
     logger.info(f"New Homo Graph Info: nb-nodes={len(nodes)}, nb-edges={len(fulledges)}, nb-tweets={len(feats)}*{len(feats[0])}")
 
-    return nodes, fulledges, feats
+    return nodes, fulledges, np.array(feats)
