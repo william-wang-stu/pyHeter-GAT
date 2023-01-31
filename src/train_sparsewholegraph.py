@@ -78,6 +78,7 @@ parser.add_argument('--model', type=str, default='hypergat', help="available opt
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
 parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
+# [default] hetersparsegat: 3e-3, hypergat: 3e-3
 parser.add_argument('--lr', type=float, default=3e-3, help='Initial learning rate.')
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
@@ -93,6 +94,8 @@ parser.add_argument('--selected-tags', type=str, default="all", help="Agg On Som
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
 parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
+parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
+parser.add_argument('--sparse-data', action='store_true', default=True, help="Use Sparse Data and Model (Only Valid When model='hypergat')")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
 parser.add_argument('--sota-test', action='store_true', default=True, help="Use Prepared Sota-Test-Dataset if set true")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
@@ -170,14 +173,18 @@ if args.model == 'hetersparsegat':
 
 elif args.model == 'hypergat':
     tw_nodes, tw_edges, tw_feats = tweet_centralized_process(homo_g=g, user_tweet_mp=user_tweet_mp, tweet_features=tweet_features, clustering_algo='mbk')
+    user_edges = sum([g.get_edgelist(), [(elem,elem) for elem in range(len(g.vs))]], [])
     hadjs = [
-        create_sparsemat_from_edgelist(edgelist=g.get_edgelist(), m=n_user, n=n_user),
-        create_sparsemat_from_edgelist(edgelist=tw_edges, m=len(tw_nodes), n=len(tw_nodes)),
+        create_sparsemat_from_edgelist(edgelist=user_edges, m=n_user, n=n_user) if args.sparse_data else 
+            create_adjmat_from_edgelist(edgelist=user_edges, size=n_user),
+        create_sparsemat_from_edgelist(edgelist=tw_edges, m=len(tw_nodes), n=len(tw_nodes)) if args.sparse_data else
+            create_adjmat_from_edgelist(edgelist=tw_edges, size=len(tw_nodes)),
     ]
-    hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
+    hadjs = [get_sparse_tensor(hadj.tocoo()) if args.sparse_data else torch.BoolTensor(hadj) for hadj in hadjs]
     hembs = [torch.FloatTensor(user_features), torch.FloatTensor(tw_feats),]
     model = HyperGraphAttentionNetwork(n_user=n_user, heter_vecspace_dims=[user_features.shape[1], tw_feats.shape[1]], nb_classes=nb_classes, 
-        n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout, instance_normalization=False)
+        n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout,
+        instance_normalization=args.instance_normalization, sparse_data=args.sparse_data,)
     logger.info(f"hadjs={len(hadjs)}*{hadjs[0].shape}, feats={hembs[0].shape}:{hembs[1].shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
 
     if args.cuda:
