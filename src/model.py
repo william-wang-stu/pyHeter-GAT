@@ -525,7 +525,7 @@ class HyperGraphAttentionNetwork(nn.Module):
             )
         setattr(self, attrname, layer_stack)
     
-    def forward(self, hadjs: list[torch.Tensor], hembs: list[torch.Tensor]):
+    def forward(self, hadjs, hembs):
         if self.inst_norm:
             norm_embs = []
             for vec_idx, vecspace_dim in enumerate(self.heter_vecspace_dims):
