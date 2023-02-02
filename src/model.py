@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 from torch.nn.parameter import Parameter
-from dgl.nn.pytorch import GATConv, GATv2Conv
+# from dgl.nn.pytorch import GATConv, GATv2Conv
 from lib.log import logger
 
 class BatchMultiHeadGraphAttention(nn.Module):

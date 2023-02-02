@@ -97,7 +97,9 @@ parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ra
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--sparse-data', action='store_true', default=True, help="Use Sparse Data and Model (Only Valid When model='hypergat')")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
-parser.add_argument('--sota-test', action='store_true', default=True, help="Use Prepared Sota-Test-Dataset if set true")
+parser.add_argument('--cluster-method', type=str, default="agg", help="Cluster Method, options are ['mbk', 'agg']")
+parser.add_argument('--agg-dist-thr', type=float, default=0.5, help="Distance Threshold used in Hierarchical Clustering Method")
+parser.add_argument('--sota-test', action='store_true', default=False, help="Use Prepared Sota-Test-Dataset if set true")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
 
 args = parser.parse_args()
@@ -172,7 +174,7 @@ if args.model == 'hetersparsegat':
         model.to(args.gpu)
 
 elif args.model == 'hypergat':
-    tw_nodes, tw_edges, tw_feats = tweet_centralized_process(homo_g=g, user_tweet_mp=user_tweet_mp, tweet_features=tweet_features, clustering_algo='mbk')
+    tw_nodes, tw_edges, tw_feats = tweet_centralized_process(homo_g=g, user_tweet_mp=user_tweet_mp, tweet_features=tweet_features, clustering_algo=args.cluster_method, distance_threshold=args.agg_dist_thr)
     user_edges = sum([g.get_edgelist(), [(elem,elem) for elem in range(len(g.vs))]], [])
     hadjs = [
         create_sparsemat_from_edgelist(edgelist=user_edges, m=n_user, n=n_user) if args.sparse_data else 

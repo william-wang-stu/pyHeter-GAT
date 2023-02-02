@@ -669,9 +669,17 @@ def get_centroids2(X, y):
     centroids_ = clf.centroids_
     return np.array([[elem for elem in center] for center in centroids_])
 
-def apply_clustering_algo(tweet_features, model:str='agg', todraw=False):
-    centroids_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/{model}_centroids_.pkl")
-    labels_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/{model}_labels_.pkl")
+def apply_clustering_algo(tweet_features, model:str='agg', desc='', thr=None, todraw=False):
+    """
+    NOTE: desc的一般形式为f"g{g.vcount()}", 而当model='agg'时形式为f"g{g.vcount()}_thr{thr}"
+    """
+    full_desc = f"{desc}"
+    if model == 'agg':
+        if thr is None:
+            thr = 0.5 # default
+        full_desc += f"_thr{thr}"
+    centroids_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/clustering/{full_desc}_{model}_centroids_.pkl")
+    labels_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/clustering/{full_desc}_{model}_labels_.pkl")
     if os.path.exists(centroids_filepath) and os.path.exists(labels_filepath):
         return load_pickle(centroids_filepath), load_pickle(labels_filepath)
 
@@ -689,25 +697,26 @@ def apply_clustering_algo(tweet_features, model:str='agg', todraw=False):
     train_tweets_df = pd.DataFrame(train_tweets)
     logger.info("--Finish Sampling Tweets--")
 
-    # 2. determine the K
-    elbow_ = KElbowVisualizer(MiniBatchKMeans(), k=(4,30))
-    elbow_.fit(train_tweets_df)
-    n_clusters = elbow_.elbow_value_
-    logger.info(f"--Finish Determining K={n_clusters}--")
-    
     # 3. perform clustering
     if model == 'agg':
-        model_ = AgglomerativeClustering(n_clusters=n_clusters)
+        logger.info(f"--Perform Hierarchical Clustering Method (thr={thr})--")
+        model_ = AgglomerativeClustering(n_clusters=None, distance_threshold=thr) # thr is set to <default> 
         labels_ = model_.fit_predict(train_tweets_df).astype("int")
-        # 3.1 get centroids
-        centroids = get_centroids2(X=train_tweets_df, y=labels_)
-        logger.info(f"--Finish Calculating {model.capitalize()} Centroids--")
         # 3.2 train classifier and give labels to other test data
         knnmodel_ = KNeighborsClassifier(n_neighbors=1)
         knnmodel_.fit(train_tweets_df, labels_)
         whole_labels_ = knnmodel_.predict(tweet_features)
         logger.info(f"--Finish Training KNNModel and Calculating {model.capitalize()} Labels--")
+        # 3.1 get centroids
+        centroids = get_centroids2(X=tweet_features, y=whole_labels_)
+        logger.info(f"--Finish Calculating {model.capitalize()} Centroids (Num={model_.n_clusters_}, Shape={centroids.shape})--")
     elif model == 'mbk':
+        # 2. determine the K
+        elbow_ = KElbowVisualizer(MiniBatchKMeans(), k=(4,30))
+        elbow_.fit(train_tweets_df)
+        n_clusters = elbow_.elbow_value_
+        logger.info(f"--Finish Determining K={n_clusters}--")
+
         model_ = MiniBatchKMeans(n_clusters=n_clusters, random_state=2023)
         # 3.2 train classifier and give labels to all data
         whole_labels_ = model_.fit_predict(tweet_features).astype("int")
@@ -745,7 +754,7 @@ def get_tweet_feat_for_tweet_nodes(lda_model_k=20):
     pyLDAvis.save_html(panel, 'LDA-vis.html') # TODO: filename
 
 def get_tweet_feat_for_user_nodes(lda_model_k=25):
-    twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/lda-model/twft_per_user.pkl")
+    twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/lda-model/twft_per_user_k{lda_model_k}.pkl")
     if os.path.exists(twft_filepath):
         logger.info(f"Trying to Get Twft in path:{twft_filepath}...Success")
         return load_pickle(twft_filepath)
@@ -762,12 +771,12 @@ def get_tweet_feat_for_user_nodes(lda_model_k=25):
     save_pickle(twft, twft_filepath)
     return twft
 
-def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, clustering_algo='mbk'):
+def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, clustering_algo, distance_threshold):
     # 1. prepare tweet feature
     lda_k = tweet_features.shape[1]
 
     # 2. apply clustering algo
-    centroids_, tw2centroids_ = apply_clustering_algo(tweet_features, model=clustering_algo)
+    centroids_, tw2centroids_ = apply_clustering_algo(tweet_features, model=clustering_algo, desc=f"g{homo_g.vcount()}", thr=distance_threshold)
 
     # replace user_tweet_edges with user_tweet_centroid_edges
     user_nodes = homo_g.vs["label"]
