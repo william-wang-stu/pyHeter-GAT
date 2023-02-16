@@ -17,7 +17,7 @@ sys.path.append(os.path.dirname(os.getcwd()))
 from lib.utils import get_sparse_tensor
 from lib.log import logger
 from utils import *
-from model import HetersparseGAT, HyperGraphAttentionNetwork
+from model import HetersparseGAT, HyperGraphAttentionNetwork, ClusterHeterGATNetwork
 import numpy as np
 import argparse
 import shutil
@@ -73,10 +73,25 @@ def load_labels(args, g, cascades):
     return labels.long(), train_mask, val_mask, test_mask, nb_classes, class_weight
 
 parser = argparse.ArgumentParser()
+# >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--model', type=str, default='hypergat', help="available options are ['hetersparsegat','hypergat']")
+parser.add_argument('--model', type=str, default='hypergat', help="available options are ['hetersparsegat','hypergat','clusterhetergat']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
+parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
+# >> Preprocess
+parser.add_argument('--min-influence', type=int, default=100, help='Min Influence Length')
+parser.add_argument('--tweet-per-user', type=int, default=10, help="Tweets Per User (20, 40, 100)")
+parser.add_argument('--sample-ratio', type=int, default=1, help="Sampling Ratio (1~inf)")
+parser.add_argument('--selected-tags', type=str, default="all", help="Agg On Some Part of Hastags")
+parser.add_argument('--cluster-method', type=str, default="agg", help="Cluster Method, options are ['mbk', 'agg']")
+parser.add_argument('--agg-dist-thr', type=float, default=0.5, help="Distance Threshold used in Hierarchical Clustering Method")
+# >> Model
+parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
+parser.add_argument('--sparse-data', action='store_true', default=True, help="Use Sparse Data and Model (Only Valid When model='hypergat')")
+parser.add_argument('--wo-user-centralized-net', action='store_true', default=False, help="Ablation Study w/o user-centralized-network")
+parser.add_argument('--wo-tweet-centralized-net', action='store_true', default=False, help="Ablation Study w/o tweet-centralized-network")
+# >> Hyper-Param
 parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
 # [default] hetersparsegat: 3e-3, hypergat: 3e-3
 parser.add_argument('--lr', type=float, default=3e-3, help='Initial learning rate.')
@@ -85,20 +100,11 @@ parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 
 parser.add_argument('--attn-dropout', type=float, default=0.1, help='Attn Dropout rate (1 - keep probability).')
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
-# parser.add_argument('--patience', type=int, default=5, help='Patience for EarlyStopping')
 parser.add_argument('--stage', type=int, default=Ntimestage-1, help="Time Stage (0~Ntimestage-1)")
-parser.add_argument('--min-influence', type=int, default=100, help='Min Influence Length')
-parser.add_argument('--tweet-per-user', type=int, default=10, help="Tweets Per User (20, 40, 100)")
-parser.add_argument('--sample-ratio', type=int, default=1, help="Sampling Ratio (1~inf)")
-parser.add_argument('--selected-tags', type=str, default="all", help="Agg On Some Part of Hastags")
+# parser.add_argument('--patience', type=int, default=5, help='Patience for EarlyStopping')
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
 parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
-parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
-parser.add_argument('--sparse-data', action='store_true', default=True, help="Use Sparse Data and Model (Only Valid When model='hypergat')")
-parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
-parser.add_argument('--cluster-method', type=str, default="agg", help="Cluster Method, options are ['mbk', 'agg']")
-parser.add_argument('--agg-dist-thr', type=float, default=0.5, help="Distance Threshold used in Hierarchical Clustering Method")
 parser.add_argument('--sota-test', action='store_true', default=False, help="Use Prepared Sota-Test-Dataset if set true")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
 
@@ -161,12 +167,22 @@ n_units = [int(x) for x in args.hidden_units.strip().split(",")]
 n_heads = [int(x) for x in args.heads.strip().split(",")]
 
 if args.model == 'hetersparsegat':
-    hadjs, feats = extend_wholegraph(g=g, ut_mp=user_tweet_mp, initial_feats=[user_features, tweet_features], tweet_per_user=args.tweet_per_user)
+    tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=user_tweet_mp, tweets_per_user=args.tweet_per_user, return_edges=True)
+    tweet_nodes = list(tweet_nodes)
+    # nodes: Nu+Nt, edges: [(Nu+Nt)*(Nu+Nt),(Nu+Nt)*(Nu+Nt)]
+    nodes, edges = reindex_graph(old_nodes=[user_nodes, tweet_nodes], old_edges=[g.get_edgelist(), ut_edges], add_self_loop=True)
+    hadjs = [create_sparsemat_from_edgelist(edgelist=edges[0], m=len(nodes), n=len(nodes)),
+        create_sparsemat_from_edgelist(edgelist=edges[1], m=len(nodes), n=len(nodes)),]
+    fn = lambda val, ind: val if len(val)==len(ind) else val[ind]
+    user_features  = fn(user_features, user_nodes)
+    tweet_features = fn(tweet_features, tweet_nodes)
+    feats = extend_featspace([user_features, tweet_features]) # (Nu,fu), (Nt,ft) -> (Nu+Nt,fu+ft) 
+
     hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
     feats = torch.FloatTensor(feats)
-    model = HetersparseGAT(n_user=n_user, nb_node_kinds=2, nb_classes=nb_classes, n_units=[feats.shape[1]]+n_units, n_heads=n_heads, 
-        attn_dropout=args.attn_dropout, dropout=args.dropout, use_pretrained_emb=False)
-    logger.info(f"hadjs={len(hadjs)}*{hadjs[0].shape}, feats={feats.shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
+    model = HetersparseGAT(n_user=n_user, nb_node_kinds=2, nb_classes=nb_classes, 
+        n_units=[feats.shape[1]]+n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout, sparse=args.sparse_data)
+    logger.info(f"hadjs={hadjs[0].shape}:{hadjs[1].shape}, feats={feats.shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
 
     if args.cuda:
         hadjs = [hadj.to(args.gpu) for hadj in hadjs]
@@ -174,20 +190,46 @@ if args.model == 'hetersparsegat':
         model.to(args.gpu)
 
 elif args.model == 'hypergat':
+    # tw_nodes: Nu+Nct, tw_edges: [(Nu+Nct)*(Nu+Nct),(Nu+Nct)*(Nu+Nct)], tw_feats: (Nu+Nct)*fct
     tw_nodes, tw_edges, tw_feats = tweet_centralized_process(homo_g=g, user_tweet_mp=user_tweet_mp, tweet_features=tweet_features, clustering_algo=args.cluster_method, distance_threshold=args.agg_dist_thr)
-    user_edges = sum([g.get_edgelist(), [(elem,elem) for elem in range(len(g.vs))]], [])
-    hadjs = [
-        create_sparsemat_from_edgelist(edgelist=user_edges, m=n_user, n=n_user) if args.sparse_data else 
-            create_adjmat_from_edgelist(edgelist=user_edges, size=n_user),
-        create_sparsemat_from_edgelist(edgelist=tw_edges, m=len(tw_nodes), n=len(tw_nodes)) if args.sparse_data else
-            create_adjmat_from_edgelist(edgelist=tw_edges, size=len(tw_nodes)),
-    ]
+    user_edges = tw_edges[0]
+    full_edges = sum([tw_edges[0], tw_edges[1]], [])
+    hadjs = [create_sparsemat_from_edgelist(edgelist=user_edges, m=n_user, n=n_user) if args.sparse_data else 
+            create_adjmat_from_edgelist(edgelist=user_edges, size=n_user), # Nu*Nu
+        create_sparsemat_from_edgelist(edgelist=full_edges, m=len(tw_nodes), n=len(tw_nodes)) if args.sparse_data else
+            create_adjmat_from_edgelist(edgelist=full_edges, size=len(tw_nodes)),] # (Nu+Nct)*(Nu+Nct)
     hadjs = [get_sparse_tensor(hadj.tocoo()) if args.sparse_data else torch.BoolTensor(hadj) for hadj in hadjs]
     hembs = [torch.FloatTensor(user_features), torch.FloatTensor(tw_feats),]
-    model = HyperGraphAttentionNetwork(n_user=n_user, heter_vecspace_dims=[user_features.shape[1], tw_feats.shape[1]], nb_classes=nb_classes, 
+    model = HyperGraphAttentionNetwork(n_user=n_user, f_dims=[user_features.shape[1], tw_feats.shape[1]], nb_classes=nb_classes, 
         n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout,
-        instance_normalization=args.instance_normalization, sparse_data=args.sparse_data,)
-    logger.info(f"hadjs={len(hadjs)}*{hadjs[0].shape}, feats={hembs[0].shape}:{hembs[1].shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
+        instance_normalization=args.instance_normalization, sparse=args.sparse_data,
+        wo_user_centralized_net=args.wo_user_centralized_net, wo_tweet_centralized_net=args.wo_tweet_centralized_net,)
+    logger.info(f"hadjs={hadjs[0].shape}:{hadjs[1].shape}, feats={hembs[0].shape}:{hembs[1].shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
+
+    if args.cuda:
+        hadjs = [hadj.to(args.gpu) for hadj in hadjs]
+        hembs = [hemb.to(args.gpu) for hemb in hembs]
+        model.to(args.gpu)
+elif args.model == 'clusterhetergat':
+    # tw_nodes: Nu+Nct, tw_edges: [(Nu+Nct)*(Nu+Nct),(Nu+Nct)*(Nu+Nct)], tw_feats: (Nu+Nct)*fct
+    tw_nodes, tw_edges, tw_feats = tweet_centralized_process(homo_g=g, user_tweet_mp=user_tweet_mp, tweet_features=tweet_features, clustering_algo=args.cluster_method, distance_threshold=args.agg_dist_thr)
+    user_edges = tw_edges[0]
+    full_edges = sum([tw_edges[0], tw_edges[1]], [])
+
+    hadjs = [create_sparsemat_from_edgelist(edgelist=user_edges, m=n_user, n=n_user),                # (Nu,Nu)
+        create_sparsemat_from_edgelist(edgelist=user_edges, m=len(tw_nodes), n=len(tw_nodes)),  # (Nu+Nct,Nu+Nct)
+        create_sparsemat_from_edgelist(edgelist=full_edges, m=len(tw_nodes), n=len(tw_nodes)),] # (Nu+Nct,Nu+Nct)
+    fn = lambda val, ind: val if len(val)==len(ind) else val[ind]
+    user_features  = fn(user_features, user_nodes)
+    tweet_features = tw_feats[n_user:] # (Nu+Nct,fct) -> (Nct,fct)
+    feats = extend_featspace([user_features, tweet_features]) # (Nu,fu), (Nct,fct) -> (Nu+Nct,fu+fct) 
+
+    hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
+    hembs = [torch.FloatTensor(user_features), torch.FloatTensor(feats)]
+    model = ClusterHeterGATNetwork(n_user=n_user, f_dims=[user_features.shape[1], tweet_features.shape[1]], nb_classes=2, 
+        n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout,
+        instance_normalization=args.instance_normalization, sparse=args.sparse_data, wo_user_centralized_net=args.wo_user_centralized_net,)
+    logger.info(f"hadjs={hadjs[0].shape}:{hadjs[1].shape}, feats={hembs[0].shape}:{hembs[1].shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
 
     if args.cuda:
         hadjs = [hadj.to(args.gpu) for hadj in hadjs]
@@ -227,6 +269,8 @@ def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
             output = model(hadjs, feats)
         elif args.model == 'hypergat':
             output = model(hadjs, hembs)
+        elif args.model == 'clusterhetergat':
+            output = model([hadjs[0], [hadjs[1], hadjs[2]]], hembs)
         
         if best_thrs is None: # valid
             loss_batch = F.nll_loss(output[val_mask], labels[val_mask], class_weight)
@@ -283,6 +327,8 @@ def train(epoch, log_desc='train_'):
             output = model(hadjs, feats)
         elif args.model == 'hypergat':
             output = model(hadjs, hembs)
+        elif args.model == 'clusterhetergat':
+            output = model([hadjs[0], [hadjs[1], hadjs[2]]], hembs)
         loss_train = F.nll_loss(output[train_mask], labels[train_mask], class_weight)
         alpha = train_mask.sum().item()
         loss  += alpha * loss_train.item()

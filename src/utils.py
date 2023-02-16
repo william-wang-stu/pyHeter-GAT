@@ -527,6 +527,23 @@ def create_adjmat_from_edgelist(edgelist, size):
         adjmat[from_][to_] = 1
     return np.array(adjmat, dtype=np.uint8)
 
+def extend_featspace(feats: List[np.ndarray]):
+    """
+    Func: [Nu*fu,Nt*ft] -> (Nu+Nt)*(fu+ft)
+    Solu: concat each feat-space, fill other positions with zero
+    """
+    full_dim  = sum([feat.shape[1] for feat in feats], 0)
+    front_dim = 0
+    extend_feats = []
+    for feat in feats:
+        nb_node = feat.shape[0]
+        extend_feat = np.concatenate(
+            (np.zeros(shape=(nb_node,front_dim)), feat, np.zeros(shape=(nb_node,full_dim-front_dim-feat.shape[1])))
+        , axis=1)
+        extend_feats.append(extend_feat)
+        front_dim += feat.shape[1]
+    return np.vstack(extend_feats)
+
 def extend_wholegraph(g, ut_mp, initial_feats, tweet_per_user=20, sparse_graph=True):
     """
     功能: 在subg_deg483子图和ut_mp的基础上, 根据tweet_per_user参数重新生成hadjs和feats
@@ -790,15 +807,12 @@ def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, clustering_
     uu_edges = homo_g.get_edgelist()
     logger.info(f"Graph Info: nb-users={len(user_nodes)}, nb-tweets={len(tweet_nodes)}, nb-uu-edges={len(uu_edges)}, nb-ut-edges={len(user_tweet_centroid_edges)}")
     nodes, edges = reindex_graph([user_nodes, tweet_nodes], [uu_edges, user_tweet_centroid_edges])
-    fulledges = []
-    for monoedges in edges:
-        fulledges.extend(monoedges)
 
     # 4. get node features for both users and tweets
     twft_for_users  = get_tweet_feat_for_user_nodes(lda_model_k=lda_k)
     feats = []
     feats.extend(list(np.array(twft_for_users)[user_nodes]))
     feats.extend(centroids_) # twft_for_tweets
-    logger.info(f"New Homo Graph Info: nb-nodes={len(nodes)}, nb-edges={len(fulledges)}, nb-tweets={len(feats)}*{len(feats[0])}")
+    logger.info(f"New Homo Graph Info: nb-nodes={len(nodes)}, nb-edges={len(edges[0])}:{len(edges[1])}, nb-tweets={len(feats)}*{len(feats[0])}")
 
-    return nodes, fulledges, np.array(feats)
+    return nodes, edges, np.array(feats)
