@@ -16,6 +16,8 @@ tensorboard-logger = "*"
 protobuf = "==3.20.0"
 dgl = "*"
 tensorboard = "*"
+yellowbrick = "*"
+pyheter-gat = {editable = true, path = "."}
 
 [dev-packages]
 torch-tb-profiler = "*"

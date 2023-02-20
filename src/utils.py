@@ -1,6 +1,7 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.getcwd()))
+# NOTE: https://stackoverflow.com/a/56806766
+# import sys
+# import os
+# sys.path.append(os.path.dirname(os.getcwd()))
 from lib.log import logger
 from lib.utils import get_node_types, extend_edges, get_sparse_tensor
 import pickle

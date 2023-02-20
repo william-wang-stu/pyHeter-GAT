@@ -10,9 +10,10 @@
 1. 以用户为中心的图注意力网络
 2. 以推文为中心的图注意力网络
 """
-import sys
-import os
-sys.path.append(os.path.dirname(os.getcwd()))
+# NOTE: https://stackoverflow.com/a/56806766
+# import sys
+# import os
+# sys.path.append(os.path.dirname(os.getcwd()))
 
 from lib.utils import get_sparse_tensor
 from lib.log import logger
@@ -85,7 +86,7 @@ parser.add_argument('--tweet-per-user', type=int, default=10, help="Tweets Per U
 parser.add_argument('--sample-ratio', type=int, default=1, help="Sampling Ratio (1~inf)")
 parser.add_argument('--selected-tags', type=str, default="all", help="Agg On Some Part of Hastags")
 parser.add_argument('--cluster-method', type=str, default="agg", help="Cluster Method, options are ['mbk', 'agg']")
-parser.add_argument('--agg-dist-thr', type=float, default=0.5, help="Distance Threshold used in Hierarchical Clustering Method")
+parser.add_argument('--agg-dist-thr', type=float, default=5.0, help="Distance Threshold used in Hierarchical Clustering Method")
 # >> Model
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--sparse-data', action='store_true', default=True, help="Use Sparse Data and Model (Only Valid When model='hypergat')")

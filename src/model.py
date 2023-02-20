@@ -1,6 +1,7 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.getcwd()))
+# NOTE: https://stackoverflow.com/a/56806766
+# import sys
+# import os
+# sys.path.append(os.path.dirname(os.getcwd()))
 from lib.log import logger
 
 import torch
@@ -244,10 +245,14 @@ class HyperGraphAttentionNetwork(nn.Module):
         if not wo_user_centralized_net:
             self.layer_stack.append(
                 self._build_layer_stack(n_layer=len(n_units), extend_units=[f_dims[0]]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, sparse=sparse))
+        else:
+            self.layer_stack.append(None)
         if not wo_tweet_centralized_net:
             self.layer_stack.append(
                 self._build_layer_stack(n_layer=len(n_units), extend_units=[f_dims[1]]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, sparse=sparse))
-        self.fc_layer = nn.Linear(in_features=n_units[-1]*len(self.layer_stack), out_features=nb_classes)
+        else:
+            self.layer_stack.append(None)
+        self.fc_layer = nn.Linear(in_features=n_units[-1]*(2-int(wo_user_centralized_net)-int(wo_tweet_centralized_net)), out_features=nb_classes)
     
     def _build_layer_stack(self, n_layer, extend_units, n_heads, attn_dropout, sparse):
         layer_stack = nn.ModuleList()
@@ -270,6 +275,8 @@ class HyperGraphAttentionNetwork(nn.Module):
 
         ret = []
         for stack_idx, layer_stack in enumerate(self.layer_stack):
+            if layer_stack is None:
+                continue
             emb, adj = hembs[stack_idx], hadjs[stack_idx]
             n = emb.shape[0]
             for layer_idx, gat_layer in enumerate(layer_stack):
