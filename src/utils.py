@@ -29,6 +29,17 @@ from sklearn.neighbors import NearestCentroid, KNeighborsClassifier
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
+from biterm.cbtm import oBTM
+from biterm.utility import vec_to_biterms, topic_summuary # helper functions
+import bitermplus
+from bertopic import BERTopic
+from sentence_transformers import SentenceTransformer
+from gsdmm import MovieGroupProcess
+from itertools import combinations, chain
+from numpy import log, exp
+from numba import njit
+from numba import types
+from numba.typed import Dict, List
 import pyLDAvis.sklearn
 
 config = configparser.ConfigParser()
@@ -755,21 +766,303 @@ def apply_clustering_algo(tweet_features, model:str='agg', desc='', thr=None, to
     
     return centroids, whole_labels_
 
-def get_tweet_feat_for_tweet_nodes(lda_model_k=20):
-    processed_texts = load_pickle(f"")
+def sample_docs_foreachuser(docs, user_tweet_mp, sample_frac=0.01, min_sample_num=3):
+    sample_docs = []
+    for user_id in range(len(user_tweet_mp)):
+        docs_id = user_tweet_mp[user_id]
+        sample_num = int(sample_frac*len(docs_id))
+        if sample_num < min_sample_num:
+            continue
+        user_docs = random.choices(docs[docs_id[0]:docs_id[-1]+1], k=sample_num)
+        sample_docs.extend(user_docs)
+    logger.info(f"sample_docs_num={len(sample_docs)}")
+    return sample_docs
+
+def lda_model(raw_texts, num_topics, visualize):
     cv = CountVectorizer(stop_words="english")
-    dtm = cv.fit_transform(processed_texts)
-    LDA_model = LatentDirichletAllocation(n_components=lda_model_k, max_iter=50, random_state=2023)
-    LDA_model.fit(dtm)
-    doc_topic = LDA_model.transform(dtm)
+    dtm = cv.fit_transform(raw_texts)
+    model = LatentDirichletAllocation(n_components=num_topics, max_iter=50, random_state=2023)
+    model.fit(dtm)
+    topic_distr = model.transform(dtm)
+    if visualize:
+        panel = pyLDAvis.sklearn.prepare(model, dtm, cv, mds='tsne') # Create the panel for the visualization
+    else:
+        panel = None
+    return {
+        "topic-distr": topic_distr,
+        "model": model,
+        "cv": cv,
+        "dtm": dtm,
+        "pyvis-panel": panel,
+    }
 
-    # save_pickle(cv,  f"cv/cv_0{texts_idx}_k{args.k}_maxiter50.p")
-    # save_pickle(dtm, f"dtm/dtm_0{texts_idx}_k{args.k}_maxiter50.p")
-    # save_pickle(doc_topic, f"doc2topic/doc_topic_0{texts_idx}_k{args.k}_maxiter50.p")
-    # save_pickle(LDA_model, f"model/model_0{texts_idx}_k{args.k}_maxiter50.p")
+def vec_to_biterms2(A, iA, jA):
+    """
+    Usage: biterms = vec_to_biterms(dtm.data, dtm.indptr, dtm.indices)
+    """
+    B_d = []
+    for row in range(len(iA)-1):
+        b_i = jA[iA[row]:iA[row+1]]
+        B_d.append([b for b in combinations(b_i,2)])
+    return B_d
 
-    panel = pyLDAvis.sklearn.prepare(LDA_model, dtm, cv, mds='tsne') # Create the panel for the visualization
-    pyLDAvis.save_html(panel, 'LDA-vis.html') # TODO: filename
+@njit
+def rand_choice_nb(arr, prob):
+    # NOTE: https://github.com/numba/numba/issues/2539
+    """
+    :param arr: A 1D numpy array of values to sample from.
+    :param prob: A 1D numpy array of probabilities for the given samples.
+    :return: A random sample from the given array with a given probability.
+    """
+    return arr[np.searchsorted(np.cumsum(prob), np.random.random(), side="right")]
+
+class njitBTM:
+    """ Biterm Topic Model
+
+        Code and naming is based on this paper http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.402.4032&rep=rep1&type=pdf
+        Thanks to jcapde for providing the code on https://github.com/jcapde/Biterm
+    """
+
+    def __init__(self, num_topics, vocab_size, alpha=1., beta=0.01, l=0.5):
+        self.K = num_topics
+        self.vocab_size = vocab_size
+        self.alpha = np.full(self.K, alpha)
+        self.beta = np.full((vocab_size, self.K), beta)
+        self.l = l
+    
+    def gibbs(self, iterations):
+        return self._gibbs(List(self.B), self.vocab_size, self.K, self.alpha, self.beta, iterations)
+
+    @staticmethod
+    @njit
+    def _gibbs(B, vocab_size, K, alpha:np.ndarray, beta:np.ndarray, iterations):
+        Z = np.zeros(len(B), dtype=np.int8)
+        # NOTE: fix error_rewrite(e, 'typing')
+        n_wz = np.zeros((vocab_size, K), dtype=np.int32)
+        n_z = np.zeros(K, dtype=np.int32)
+
+        for i, b_i in enumerate(B):
+            topic = np.random.choice(K, 1)[0]
+            n_wz[b_i[0], topic] += 1
+            n_wz[b_i[1], topic] += 1
+            n_z[topic] += 1
+            Z[i] = topic
+
+        for _ in range(iterations):
+            for i, b_i in enumerate(B):
+                n_wz[b_i[0], Z[i]] -= 1
+                n_wz[b_i[1], Z[i]] -= 1
+                n_z[Z[i]] -= 1
+                P_w0z = (n_wz[b_i[0], :] + beta[b_i[0], :]) / (2 * n_z + beta.sum(axis=0))
+                P_w1z = (n_wz[b_i[1], :] + beta[b_i[1], :]) / (2 * n_z + 1 + beta.sum(axis=0))
+                P_z = (n_z + alpha) * P_w0z * P_w1z
+                P_z = P_z / P_z.sum()
+                Z[i] = rand_choice_nb(np.arange(K), P_z)
+                n_wz[b_i[0], Z[i]] += 1
+                n_wz[b_i[1], Z[i]] += 1
+                n_z[Z[i]] += 1
+                
+        return n_z, n_wz
+
+    def fit(self, B_d, iterations):
+        """
+        Usage:
+        model = njitBTM(num_topics=20, vocab_size=len(vocab))
+        step = 1000
+        for idx in range(0, len(biterms), step):
+            chunk = biterms[idx:idx+step]
+            model.fit(chunk, iterations=10)
+        """
+        self.B = list(chain(*B_d))
+        n_z, self.nwz = self.gibbs(iterations)
+
+        self.phi_wz = (self.nwz + self.beta) / np.array([(self.nwz + self.beta).sum(axis=0)] * self.vocab_size)
+        self.theta_z = (n_z + self.alpha) / (n_z + self.alpha).sum()
+
+        self.alpha += self.l * n_z
+        self.beta += self.l * self.nwz
+    
+    def transform(self, B_d):
+        P_zd = np.zeros([len(B_d), self.K])
+        for i, d in enumerate(B_d):
+            P_zb = np.zeros([len(d), self.K])
+            for j, b in enumerate(d):
+                P_zbi = self.theta_z * self.phi_wz[b[0], :] * self.phi_wz[b[1], :]
+                P_zb[j] = P_zbi / P_zbi.sum()
+            P_zd[i] = P_zb.sum(axis=0) / P_zb.sum(axis=0).sum()
+
+        return P_zd
+
+def btm_model(raw_texts, num_topics, visualize):
+    # NOTE: sample a fraction of raw-texts for fitting model, since fitting whole raw-texts(~60m) corpus is toooooo time-consuming!
+    docs = sample_docs_foreachuser(docs=raw_texts, user_tweet_mp=load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p")))
+    
+    cv = CountVectorizer(stop_words="english")
+    dtm = cv.fit_transform(docs)
+    biterms = vec_to_biterms2(dtm.data, dtm.indptr, dtm.indices)
+    vocab = np.array(cv.get_feature_names_out()) # get_feature_names_out is only available in ver1.0
+    model = oBTM(num_topics=num_topics, V=vocab)
+
+    logger.info("Train Online BTM ..")
+    step = 1000
+    for idx in range(0, len(biterms), step):
+        chunk = biterms[idx:idx+step]
+        model.fit(chunk, iterations=10)
+    
+    topic_distr = model.transform(biterms)
+    logger.info(f"Finish Training...Calculating Topic Coherence")
+    topic_summuary(P_wz=model.phi_wz.T, X=dtm, V=vocab, M=10)
+    if visualize:
+        dtm_dense = dtm.toarray()
+        panel = pyLDAvis.prepare(model.phi_wz.T, topic_distr, np.count_nonzero(dtm_dense, axis=1), vocab, np.sum(dtm_dense, axis=0))
+    else:
+        panel = None
+    return {
+        "topic-distr": topic_distr,
+        "model": model,
+        "cv": cv,
+        "dtm": dtm,
+        "pyvis-panel": panel,
+    }
+
+def btmplus_model(raw_texts, num_topics, visualize):
+    cv = CountVectorizer(stop_words="english")
+    dtm = cv.fit_transform(raw_texts)
+    vocab = np.array(cv.get_feature_names_out()) # get_feature_names_out is only available in ver1.0
+    
+    # replace words with its vocab word_ids
+    docs_vec = bitermplus.get_vectorized_docs(raw_texts, vocab)
+    biterms = bitermplus.get_biterms(docs_vec)
+    model = bitermplus.BTM(dtm, vocab, T=num_topics)
+    model.fit(biterms, iterations=30)
+
+    topic_distr = model.transform(docs_vec)
+    logger.info(f"METRICS: perplexity={model.perplexity_}, coherence={model.coherence_}") # model.labels_
+    return {
+        "topic-distr": topic_distr,
+        "model": model,
+        "cv": cv,
+        "dtm": dtm,
+        "pyvis-panel": None,
+    }
+
+@njit
+def score2(doc, m_z, n_z, n_z_w, V, D, alpha=0.01, beta=0.01, K=20):
+    '''
+    Score a document
+
+    Implements formula (3) of Yin and Wang 2014.
+    http://dbgroup.cs.tsinghua.edu.cn/wangjy/papers/KDD14-GSDMM.pdf
+
+    :param doc: list[str]: The doc token stream
+    :return: list[float]: A length K probability vector where each component represents
+                            the probability of the document appearing in a particular cluster
+    '''
+    p = [0 for _ in range(K)]
+
+    #  We break the formula into the following pieces
+    #  p = N1*N2/(D1*D2) = exp(lN1 - lD1 + lN2 - lD2)
+    #  lN1 = log(m_z[z] + alpha)
+    #  lN2 = log(D - 1 + K*alpha)
+    #  lN2 = log(product(n_z_w[w] + beta)) = sum(log(n_z_w[w] + beta))
+    #  lD2 = log(product(n_z[d] + V*beta + i -1)) = sum(log(n_z[d] + V*beta + i -1))
+
+    lD1 = log(D - 1 + K * alpha)
+    doc_size = len(doc)
+    for label in range(K):
+        lN1 = log(m_z[label] + alpha)
+        lN2 = 0
+        lD2 = 0
+        for word in doc:
+            lN2 += log(n_z_w[label].get(word, 0) + beta)
+        for j in range(1, doc_size +1):
+            lD2 += log(n_z[label] + V * beta + j - 1)
+        p[label] = exp(lN1 - lD1 + lN2 - lD2)
+
+    # normalize the probability vector
+    pnorm = sum(p)
+    pnorm = pnorm if pnorm>0 else 1
+    return [pp/pnorm for pp in p]
+
+def gsdmm_score_topic_distr(docs, m_z, n_z, n_z_w, n_terms, n_docs):
+    # Preparation
+    n_z_w_param = []
+    for n_z_w_element in n_z_w:
+        dict_param_t = Dict.empty(key_type=types.unicode_type, value_type=types.int64)
+        keys = list(n_z_w_element.keys())
+        for key in keys:
+            dict_param_t[key] = n_z_w_element[key]
+        n_z_w_param.append(dict_param_t)
+    
+    scores = []
+    # NOTE: time-consuming!!! ~1min/100,000docs in the following for-loop
+    for doc in docs:
+        scores.append(score2(doc, List(m_z), List(n_z), List(n_z_w_param), n_terms, n_docs))
+    return scores
+
+def gsdmm_model(raw_texts, num_topics, visualize):
+    # NOTE: we cant first sample train-corpus, bcz vocabs extracted from train-corpus is not enough for transforming the whole train+test corpus
+    cv = CountVectorizer(stop_words="english")
+    dtm = cv.fit_transform(raw_texts)
+    n_docs, n_terms = dtm.shape
+    model = MovieGroupProcess(K=num_topics, alpha=0.01, beta=0.01, n_iters=30)
+    docs = [doc.split(' ') for doc in docs] # NOTE: Important!!!, since our sentence is string"Absolutely", if we dont split it, `for word in doc` would produce 'A b s...'
+    # NOTE: around 1min/10,0000docs
+    labels = model.fit(docs, n_terms)
+
+    # get topic distribution
+    # NOTE: we can rewrite mgp.py in gsdmm to save intermediate variables, i.e. m_z, n_z, n_z_w, d_z
+    # model = MovieGroupProcess().from_data(K=20, alpha=0.01, beta=0.01, D=n_docs, vocab_size=n_terms, 
+    #     cluster_doc_count=m_z, cluster_word_count=n_z, cluster_word_distribution=n_z_w)
+    topic_distrs = []
+    for doc in raw_texts: # NOTE: around 1min/10,0000docs
+        topic_distrs.append(model.score(doc))
+    return {
+        "topic-distr": topic_distrs,
+        "model": model,
+        "cv": cv,
+        "dtm": dtm,
+        "pyvis-panel": None,
+    }
+
+def get_tweet_feat_for_tweet_nodes(model="lda", num_topics=20, visualize=False):
+    """
+    valid model names are ['lda','btm','gsdmm','bertopic']
+    """
+    suffix = f"model{model}" # used for naming saved-results, i.e. topic-distr_{suffix}.pkl
+    if model == 'lda' or model == 'btm':
+        suffix += f"_numtopic{num_topics}"
+
+    sent_emb_dir = os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/")
+    raw_texts = load_pickle(os.path.join(sent_emb_dir, "processedtexts-per-text/ptexts_per_user_all.p"))
+    if model == "lda":
+        ret = lda_model(raw_texts=raw_texts, num_topics=num_topics, visualize=visualize)
+    elif model == "btm":
+        # ret = btm_model(raw_texts=raw_texts, num_topics=num_topics, visualize=visualize)
+        ret = btmplus_model(raw_texts=raw_texts, num_topics=num_topics, visualize=visualize)
+    elif model == 'gsdmm':
+        ret = gsdmm_model(raw_texts=raw_texts, num_topics=num_topics, visualize=visualize)
+    elif model == 'bertopic':
+        # NOTE: there are two ways for creating topic distributions, see details in reference https://github.com/MaartenGr/BERTopic/issues/1026
+        # we choose to use func approximate_distribution(), since it is fasttttt!
+        # Other options for accelaerating can be referenced in https://maartengr.github.io/BERTopic/getting_started/tips_and_tricks/tips_and_tricks.html#gpu-acceleration
+        model_filepath = os.path.join(sent_emb_dir, f"topic-distr_{suffix}.pkl")
+        if os.path.exists(model_filepath):
+            model = load_pickle(model_filepath)
+            topic_distr, _ = model.approximate_distribution(raw_texts, min_similarity=1e-5)
+            return
+        sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
+        bertopic_model = BERTopic(language="english", nr_topics="auto", embedding_model=sentence_model)
+        model = bertopic_model.fit(raw_texts)
+        topic_distr, _ = model.approximate_distribution(raw_texts, min_similarity=1e-5)
+        # topics = model._map_predictions(model.hdbscan_model.labels_)
+        # probs = model.hdbscan_model.probabilities_
+    
+    # Save Final Results
+    for key,val in ret.items():
+        if val is None:
+            continue
+        save_pickle(val, f"{key}_{suffix}.pkl")
 
 def get_tweet_feat_for_user_nodes(lda_model_k=25):
     twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/lda-model/twft_per_user_k{lda_model_k}.pkl")

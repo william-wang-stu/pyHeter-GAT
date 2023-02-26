@@ -18,6 +18,11 @@ dgl = "*"
 tensorboard = "*"
 yellowbrick = "*"
 pyheter-gat = {editable = true, path = "."}
+numpy = "==1.23"
+bertopic = "*"
+sentence-transformers = "*"
+tensorflow = "*"
+bitermplus = "*"
 
 [dev-packages]
 torch-tb-profiler = "*"
