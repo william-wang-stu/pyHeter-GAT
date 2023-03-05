@@ -1,4 +1,4 @@
-from utils.utils import DATA_ROOTPATH, load_pickle, save_pickle, sample_docs_foreachuser
+from utils.utils import DATA_ROOTPATH, load_pickle, save_pickle, sample_docs_foreachuser, sample_docs_foreachuser2
 from lib.log import logger
 import random
 import os
@@ -89,8 +89,9 @@ def bertopic_model(raw_texts, num_topics, visualize):
     raw_texts = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/raw_texts_aggby_user_filter_lt2words_processedforbert_subg.pkl")
     raw_texts = [item for sublist in sample_docs for item in sublist]
     """
+    train_texts = sample_docs_foreachuser2(raw_texts, sample_frac=0.1)
     sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
-    embeddings = sentence_model.encode(raw_texts, show_progress_bar=True)
+    embeddings = sentence_model.encode(train_texts, show_progress_bar=True)
 
     # Create instances of GPU-accelerated UMAP and HDBSCAN
     umap_model = UMAP(n_components=5, n_neighbors=15, min_dist=0.0)
@@ -107,26 +108,36 @@ def bertopic_model(raw_texts, num_topics, visualize):
         umap_model=umap_model, hdbscan_model=hdbscan_model
     )
 
-    topic_model = model.fit(raw_texts, embeddings)
+    # NOTE: fit on 1/10 dataset takes ~10min, ~8G(13G on the peak) RAM
+    topic_model = model.fit(train_texts, embeddings)
     # topic_model.reduce_topics(raw_texts, nr_topics=50)
 
-    topic_distr, _ = topic_model.approximate_distribution(raw_texts, min_similarity=1e-5)
-    topics, probs = topic_model.transform(raw_texts)
+    # NOTE: transform on whole dataset takes ~2h, 1/4 takes 30min
+    N_FRAC, n_docs = 4, len(raw_texts)
+    topic_distr_all, topic_label_all, topic_prob_all = [], [], []
+    for frac in range(N_FRAC):
+        test_texts = raw_texts[int(n_docs/N_FRAC*frac):int(n_docs/N_FRAC*(frac+1))]
+        topic_distr, _ = topic_model.approximate_distribution(test_texts, min_similarity=1e-5)
+        topic_distr = topic_distr.astype(np.float16) # save space and s/l time
+        labels, probs = topic_model.transform(test_texts)
+        topic_distr_all.extend(topic_distr); topic_label_all.extend(labels); topic_prob_all.extend(probs)
+    
+    # NOTE: update topics and reduce outliers in class '-1'
     # new_topics = topic_model.reduce_outliers(raw_texts, topics, probabilities=topic_distr, strategy="probabilities")
     # topic_model.update_topics(raw_texts, new_topics)
 
-    # Visualize All Topics in One Distance-Map
+    # NOTE: Visualize All Topics in One Distance-Map
     # topic_model.visualize_topics()
-    # Visualize All Document-Embeddings aggby Clusters
+    # NOTE: Visualize All Document-Embeddings aggby Clusters
     # topic_model.visualize_documents(sample_docs, embeddings=embeddings, hide_document_hover=False)
 
-    # Get Top-N Words per Topic
+    # NOTE: Get Top-N Words per Topic
     # topic_model.topic_representations_
-    # Get Topic-Word Matrix
+    # NOTE: Get Topic-Word Matrix
     # topic_model.c_tf_idf
 
     return {
-        "topic-distr": topic_distr,
+        "topic-distr": topic_distr_all,
         "model": topic_model,
         "cv": None,
         "dtm": None,
@@ -168,6 +179,12 @@ def calculate_coherence_score(docs, topics, topic_model:BERTopic):
         corpus=corpus,
         dictionary=dictionary,
         coherence='c_v')
+    # coherence_model_npmi = CoherenceModel(topics=topic_words,
+    #     texts=tokens,
+    #     corpus=corpus,
+    #     dictionary=dictionary,
+    #     coherence='c_npmi')
+    # coherence_model_npmi.get_coherence()
     npmi = Coherence(texts=tokens, topk=topic_model.top_n_words, measure='c_npmi')
     topic_diversity = TopicDiversity(topk=topic_model.top_n_words)
     results = {

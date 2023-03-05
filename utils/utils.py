@@ -96,3 +96,17 @@ def sample_docs_foreachuser(docs, user_tweet_mp, sample_frac=0.01, min_sample_nu
         sample_docs.extend(user_docs)
     logger.info(f"sample_docs_num={len(sample_docs)}")
     return sample_docs
+
+def sample_docs_foreachuser2(docs, sample_frac=0.01, min_sample_num=3):
+    """
+    func: process docs with format of lists of lists, i.e. [[]]
+    """
+    sample_docs = []
+    for texts in docs:
+        if len(texts) == 0:
+            continue
+        sample_num = int(sample_frac*len(texts))
+        sample_texts = random.choices(texts, k=max(sample_num, min_sample_num))
+        sample_docs.extend(sample_texts)
+    logger.info(f"sample_docs_num={len(sample_docs)}")
+    return sample_docs
