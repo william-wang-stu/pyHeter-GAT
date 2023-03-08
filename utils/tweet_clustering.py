@@ -1,7 +1,6 @@
-from utils import DATA_ROOTPATH, load_pickle, save_pickle
+from utils.utils import DATA_ROOTPATH, load_pickle, save_pickle
 from lib.log import logger
 from utils.graph import reindex_graph
-from utils.tweet_embedding import get_tweet_feat_for_user_nodes
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -93,6 +92,36 @@ def apply_clustering_algo(tweet_features, model:str='agg', desc='', thr=None, to
         plt.show()
     
     return centroids, whole_labels_
+
+def get_tweet_feat_for_user_nodes(model='lda', num_topics=25):
+    if model == 'lda':
+        twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/lda-model/twft_per_user_k{num_topics}.pkl")
+    elif model == 'bertopic':
+        twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/tweet-embedding/bertopic/twft_per_user.pkl")
+    if os.path.exists(twft_filepath):
+        logger.info(f"Trying to Get Twft in path:{twft_filepath}...Success")
+        return load_pickle(twft_filepath)
+    
+    twft = []
+    if model == 'lda':
+        prefix, suffix = os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model"), f"_k{num_topics}_maxiter{50}"
+        logger.info(f"Calculating Twft Using CountVectorizer/LDAModel/ProcessedUserTexts in path:{prefix}/.../{suffix}")
+        for part in range(1,11):
+            cv_ = load_pickle(f"{prefix}/cv/cv_0{part}{suffix}.p")
+            lda_model_ = load_pickle(f"{prefix}/model/model_0{part}{suffix}.p")
+            user_texts_l = load_pickle(f"{prefix}/processedtexts-per-user/ProcessedTexts_{part}.p")
+            twft.extend(lda_model_.transform(cv_.transform(user_texts_l)))
+        twft = np.array(twft)
+    elif model == 'bertopic':
+        prefix = os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model")
+        model = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_approx_distribution_reduce_auto_merge_lt01_subg.pkl"))
+        for part in range(1,11):
+            user_texts_l = load_pickle(f"{prefix}/processedtexts-per-user/ProcessedTexts_{part}.p")
+            topic_distr, _ = model.approximate_distribution(user_texts_l).astype()
+            topic_distr = topic_distr.astype(np.float16) # save space and s/l time
+            twft.extend(topic_distr)
+    save_pickle(twft, twft_filepath)
+    return twft
 
 def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, clustering_algo, distance_threshold):
     # 1. prepare tweet feature

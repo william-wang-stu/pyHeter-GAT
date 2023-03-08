@@ -4,6 +4,7 @@ import random
 import os
 import numpy as np
 import pandas as pd
+from typing import List
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 import pyLDAvis.sklearn
@@ -86,8 +87,11 @@ def gsdmm_model(raw_texts, num_topics, visualize):
 
 def bertopic_model(raw_texts, num_topics, visualize):
     """
-    raw_texts = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/raw_texts_aggby_user_filter_lt2words_processedforbert_subg.pkl")
-    raw_texts = [item for sublist in sample_docs for item in sublist]
+    Arguments
+        raw_texts:  lists of raw texts
+        num_topics: NO USE HERE
+    >>> raw_texts = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/raw_texts_aggby_user_filter_lt2words_processedforbert_subg.pkl")
+    >>> raw_texts = [item for sublist in sample_docs for item in sublist]
     """
     train_texts = sample_docs_foreachuser2(raw_texts, sample_frac=0.1)
     sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -143,6 +147,18 @@ def bertopic_model(raw_texts, num_topics, visualize):
         "dtm": None,
         "pyvis-panel": None,
     }
+
+def merge_similar_topics(topic_model:BERTopic, docs:List, merge_thr:float=0.1) -> BERTopic:
+    # reduce topics
+    topic_model.reduce_topics(docs, nr_topics="auto")
+
+    # merge topics
+    hierarchical_topics = topic_model.hierarchical_topics(docs)
+    merge_ids = [row['Topics'] for _, row in hierarchical_topics.iterrows() if row['Distance']<merge_thr]
+    topic_model.merge_topics(docs, merge_ids)
+    # Visualize Hierarchical Topics
+    # topic_model.get_topic_tree(hierarchical_topics)
+    return topic_model
 
 def calculate_coherence_score(docs, topics, topic_model:BERTopic):
     """
@@ -215,38 +231,10 @@ def get_tweet_feat_for_tweet_nodes(model="lda", num_topics=20, visualize=False):
         # NOTE: there are two ways for creating topic distributions, see details in reference https://github.com/MaartenGr/BERTopic/issues/1026
         # we choose to use func approximate_distribution(), since it is fasttttt!
         # Other options for accelaerating can be referenced in https://maartengr.github.io/BERTopic/getting_started/tips_and_tricks/tips_and_tricks.html#gpu-acceleration
-        model_filepath = os.path.join(sent_emb_dir, f"topic-distr_{suffix}.pkl")
-        if os.path.exists(model_filepath):
-            model = load_pickle(model_filepath)
-            topic_distr, _ = model.approximate_distribution(raw_texts, min_similarity=1e-5)
-            return
-        sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
-        bertopic_model = BERTopic(language="english", nr_topics="auto", embedding_model=sentence_model)
-        model = bertopic_model.fit(raw_texts)
-        topic_distr, _ = model.approximate_distribution(raw_texts, min_similarity=1e-5)
-        # topics = model._map_predictions(model.hdbscan_model.labels_)
-        # probs = model.hdbscan_model.probabilities_
+        ret = bertopic_model(raw_texts=raw_texts, num_topics=num_topics, visualize=visualize)
     
     # Save Final Results
     for key,val in ret.items():
         if val is None:
             continue
         save_pickle(val, f"{key}_{suffix}.pkl")
-
-def get_tweet_feat_for_user_nodes(lda_model_k=25):
-    twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/lda-model/twft_per_user_k{lda_model_k}.pkl")
-    if os.path.exists(twft_filepath):
-        logger.info(f"Trying to Get Twft in path:{twft_filepath}...Success")
-        return load_pickle(twft_filepath)
-    
-    twft = []
-    prefix, suffix = os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model"), f"_k{lda_model_k}_maxiter{50}"
-    logger.info(f"Calculating Twft Using CountVectorizer/LDAModel/ProcessedUserTexts in path:{prefix}/.../{suffix}")
-    for part in range(1,11):
-        cv_ = load_pickle(f"{prefix}/cv/cv_0{part}{suffix}.p")
-        lda_model_ = load_pickle(f"{prefix}/model/model_0{part}{suffix}.p")
-        user_texts_l = load_pickle(f"{prefix}/processedtexts-per-user/ProcessedTexts_{part}.p")
-
-        twft.extend(lda_model_.transform(cv_.transform(user_texts_l)))
-    save_pickle(twft, twft_filepath)
-    return twft

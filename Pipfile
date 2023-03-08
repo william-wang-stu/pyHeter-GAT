@@ -23,6 +23,7 @@ bertopic = "*"
 sentence-transformers = "*"
 tensorflow = "*"
 bitermplus = "*"
+emoji = "*"
 
 [dev-packages]
 torch-tb-profiler = "*"

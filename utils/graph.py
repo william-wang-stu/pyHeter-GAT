@@ -1,4 +1,4 @@
-from utils import load_pickle, save_pickle
+from utils.utils import load_pickle, save_pickle
 from lib.log import logger
 import igraph
 import os
@@ -160,6 +160,21 @@ def extend_featspace(feats: List[np.ndarray]):
         extend_feats.append(extend_feat)
         front_dim += feat.shape[1]
     return np.vstack(extend_feats)
+
+def extend_featspace2(feats: List[np.ndarray]):
+    """
+    Func: [Nu*fu,Nt*ft] -> [(Nu+Nt)*fu,(Nu+Nt)*ft]
+    """
+    nb_nodes = sum([feat.shape[0] for feat in feats], 0)
+    extend_feats = []
+    front_dim = 0
+    for feat in feats:
+        extend_feat = np.concatenate(
+            (np.zeros(shape=(front_dim, feat.shape[1])), feat, np.zeros(shape=(nb_nodes-front_dim-feat.shape[0], feat.shape[1])))
+            , axis=0)
+        extend_feats.append(extend_feat)
+        front_dim += feat.shape[0]
+    return extend_feats
 
 def extend_wholegraph(g, ut_mp, initial_feats, tweet_per_user=20, sparse_graph=True):
     """

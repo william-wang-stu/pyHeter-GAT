@@ -134,12 +134,14 @@ if isinstance(args.stage, int) and 0<=args.stage<=7:
     user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
     user_tweet_mp = user_tweet_mp[args.stage]
 else:
-    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+    # user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+    user_tweet_mp = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/111ut_mp_filter_lt2words_processedforbert_subg.pkl")
 
 structural_temporal_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
 deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), 208894)
 user_features = np.concatenate((structural_temporal_feats[user_nodes], deepwalk_feats[user_nodes]), axis=1)
-tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
+# tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
+tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_approx_distribution_reduce_auto_merge_lt01_subg.pkl"))
 if not isinstance(tweet_features, np.ndarray):
     tweet_features = np.array(tweet_features)
 logger.info(f"user-feats dim={user_features.shape[1]}, tweet-feats dim={tweet_features.shape[1]}")
@@ -177,7 +179,7 @@ if args.model == 'hetersparsegat' or args.model == 'hetergatwoconcatfeat':
     hadjs = [create_sparsemat_from_edgelist(edgelist=edges[0], m=len(nodes), n=len(nodes)),
         create_sparsemat_from_edgelist(edgelist=edges[1], m=len(nodes), n=len(nodes)),]
     hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
-    fn = lambda val, ind: val if len(val)==len(ind) else val[ind]
+    fn = lambda val,ind: val if len(val)==len(ind) else val[ind]
     user_features  = fn(user_features, user_nodes)
     tweet_features = fn(tweet_features, tweet_nodes)
 
