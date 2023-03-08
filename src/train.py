@@ -17,8 +17,10 @@
 
 from lib.utils import get_sparse_tensor
 from lib.log import logger
-from utils import *
-from model import HetersparseGAT, HyperGraphAttentionNetwork, ClusterHeterGATNetwork
+from utils.utils import *
+from utils.graph import *
+from utils.tweet_clustering import tweet_centralized_process
+from src.model import HetersparseGAT, HetergatWOConcatFeat, HyperGraphAttentionNetwork, ClusterHeterGATNetwork
 import numpy as np
 import argparse
 import shutil
@@ -76,7 +78,7 @@ def load_labels(args, g, cascades):
 parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--model', type=str, default='hypergat', help="available options are ['hetersparsegat','hypergat','clusterhetergat']")
+parser.add_argument('--model', type=str, default='hypergat', help="available options are ['hetersparsegat','hetergatwoconcatfeat','hypergat','clusterhetergat']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
@@ -167,27 +169,37 @@ n_user = g.vcount()
 n_units = [int(x) for x in args.hidden_units.strip().split(",")]
 n_heads = [int(x) for x in args.heads.strip().split(",")]
 
-if args.model == 'hetersparsegat':
+if args.model == 'hetersparsegat' or args.model == 'hetergatwoconcatfeat':
     tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=user_tweet_mp, tweets_per_user=args.tweet_per_user, return_edges=True)
     tweet_nodes = list(tweet_nodes)
     # nodes: Nu+Nt, edges: [(Nu+Nt)*(Nu+Nt),(Nu+Nt)*(Nu+Nt)]
     nodes, edges = reindex_graph(old_nodes=[user_nodes, tweet_nodes], old_edges=[g.get_edgelist(), ut_edges], add_self_loop=True)
     hadjs = [create_sparsemat_from_edgelist(edgelist=edges[0], m=len(nodes), n=len(nodes)),
         create_sparsemat_from_edgelist(edgelist=edges[1], m=len(nodes), n=len(nodes)),]
+    hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
     fn = lambda val, ind: val if len(val)==len(ind) else val[ind]
     user_features  = fn(user_features, user_nodes)
     tweet_features = fn(tweet_features, tweet_nodes)
-    feats = extend_featspace([user_features, tweet_features]) # (Nu,fu), (Nt,ft) -> (Nu+Nt,fu+ft) 
 
-    hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
-    feats = torch.FloatTensor(feats)
-    model = HetersparseGAT(n_user=n_user, nb_node_kinds=2, nb_classes=nb_classes, 
-        n_units=[feats.shape[1]]+n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout, sparse=args.sparse_data)
-    logger.info(f"hadjs={hadjs[0].shape}:{hadjs[1].shape}, feats={feats.shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
+    if args.model == 'hetersparsegat':
+        feats = extend_featspace([user_features, tweet_features]) # (Nu,fu), (Nt,ft) -> (Nu+Nt,fu+ft) 
+        feats = torch.FloatTensor(feats)
+        model = HetersparseGAT(n_user=n_user, nb_node_kinds=2, nb_classes=nb_classes, 
+            n_units=[feats.shape[1]]+n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout, sparse=args.sparse_data)
+        logger.info(f"hadjs={hadjs[0].shape}:{hadjs[1].shape}, feats={feats.shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
+        if args.cuda:
+            feats = feats.to(args.gpu)
+    else:
+        feats = extend_featspace2([user_features, tweet_features])
+        hembs = [torch.FloatTensor(feat) for feat in feats]
+        model = HetergatWOConcatFeat(n_feats=[user_features.shape[1],tweet_features.shape[1]], n_units=n_units, n_heads=n_heads, shape_ret=(n_user,nb_classes),
+            attn_dropout=args.attn_dropout, dropout=args.dropout, instance_normalization=args.instance_normalization, sparse=args.sparse_data)
+        logger.info(f"hadjs={hadjs[0].shape}:{hadjs[1].shape}, hembs={hembs[0].shape}:{hembs[1].shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
+        if args.cuda:
+            hembs = [hemb.to(args.gpu) for hemb in hembs]
 
     if args.cuda:
         hadjs = [hadj.to(args.gpu) for hadj in hadjs]
-        feats = feats.to(args.gpu)
         model.to(args.gpu)
 
 elif args.model == 'hypergat':
@@ -268,6 +280,8 @@ def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
         
         if args.model == 'hetersparsegat':
             output = model(hadjs, feats)
+        elif args.model == 'hetergatwoconcatfeat':
+            output = model(hadjs, hembs)
         elif args.model == 'hypergat':
             output = model(hadjs, hembs)
         elif args.model == 'clusterhetergat':
@@ -326,6 +340,8 @@ def train(epoch, log_desc='train_'):
         optimizer.zero_grad()
         if args.model == 'hetersparsegat':
             output = model(hadjs, feats)
+        elif args.model == 'hetergatwoconcatfeat':
+            output = model(hadjs, hembs)
         elif args.model == 'hypergat':
             output = model(hadjs, hembs)
         elif args.model == 'clusterhetergat':
