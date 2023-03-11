@@ -229,7 +229,7 @@ class HetersparseGAT(nn.Module):
 
 class HetergatWOConcatFeat(nn.Module):
     def __init__(
-        self, n_feats, n_units, n_heads, shape_ret,
+        self, n_feats, n_unified, n_units, n_heads, shape_ret,
         attn_dropout, dropout, instance_normalization=False, sparse=True, skip_fc=False,
     ) -> None:
         """
@@ -245,7 +245,7 @@ class HetergatWOConcatFeat(nn.Module):
         self.dropout = dropout
         self.inst_norm = instance_normalization
         self.skip_fc = skip_fc
-        n_unified, d1 = n_units[0], n_units[-1]
+        d1 = n_units[-1]
         for i, n_feat in enumerate(n_feats):
             weight_mat = nn.Parameter(torch.Tensor(n_feat, n_unified))
             nn.init.xavier_uniform_(weight_mat) # set initial values

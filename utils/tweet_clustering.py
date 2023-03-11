@@ -3,6 +3,7 @@ from lib.log import logger
 from utils.graph import reindex_graph
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import os
 import random
 from yellowbrick.cluster import KElbowVisualizer
@@ -36,6 +37,7 @@ def apply_clustering_algo(tweet_features, model:str='agg', desc='', thr=None, to
         full_desc += f"_thr{thr}"
     centroids_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/clustering/{full_desc}_{model}_centroids_.pkl")
     labels_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/clustering/{full_desc}_{model}_labels_.pkl")
+    logger.info(f"centroids={centroids_filepath}, labels={labels_filepath}")
     if os.path.exists(centroids_filepath) and os.path.exists(labels_filepath):
         return load_pickle(centroids_filepath), load_pickle(labels_filepath)
 
@@ -93,7 +95,7 @@ def apply_clustering_algo(tweet_features, model:str='agg', desc='', thr=None, to
     
     return centroids, whole_labels_
 
-def get_tweet_feat_for_user_nodes(model='lda', num_topics=25):
+def get_tweet_feat_for_user_nodes(model='lda', num_topics=25) -> np.ndarray:
     if model == 'lda':
         twft_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/lda-model/twft_per_user_k{num_topics}.pkl")
     elif model == 'bertopic':
@@ -111,7 +113,6 @@ def get_tweet_feat_for_user_nodes(model='lda', num_topics=25):
             lda_model_ = load_pickle(f"{prefix}/model/model_0{part}{suffix}.p")
             user_texts_l = load_pickle(f"{prefix}/processedtexts-per-user/ProcessedTexts_{part}.p")
             twft.extend(lda_model_.transform(cv_.transform(user_texts_l)))
-        twft = np.array(twft)
     elif model == 'bertopic':
         prefix = os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model")
         model = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_approx_distribution_reduce_auto_merge_lt01_subg.pkl"))
@@ -120,15 +121,16 @@ def get_tweet_feat_for_user_nodes(model='lda', num_topics=25):
             topic_distr, _ = model.approximate_distribution(user_texts_l).astype()
             topic_distr = topic_distr.astype(np.float16) # save space and s/l time
             twft.extend(topic_distr)
+    twft = np.array(twft)
     save_pickle(twft, twft_filepath)
     return twft
 
-def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, clustering_algo, distance_threshold):
+def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, embedding_method, clustering_algo, distance_threshold):
     # 1. prepare tweet feature
     lda_k = tweet_features.shape[1]
 
     # 2. apply clustering algo
-    centroids_, tw2centroids_ = apply_clustering_algo(tweet_features, model=clustering_algo, desc=f"g{homo_g.vcount()}", thr=distance_threshold)
+    centroids_, tw2centroids_ = apply_clustering_algo(tweet_features, model=clustering_algo, desc=f"g{homo_g.vcount()}_emb{embedding_method}", thr=distance_threshold)
 
     # replace user_tweet_edges with user_tweet_centroid_edges
     user_nodes = homo_g.vs["label"]
@@ -144,10 +146,10 @@ def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, clustering_
     nodes, edges = reindex_graph([user_nodes, tweet_nodes], [uu_edges, user_tweet_centroid_edges])
 
     # 4. get node features for both users and tweets
-    twft_for_users  = get_tweet_feat_for_user_nodes(lda_model_k=lda_k)
-    feats = []
-    feats.extend(list(np.array(twft_for_users)[user_nodes]))
-    feats.extend(centroids_) # twft_for_tweets
-    logger.info(f"New Homo Graph Info: nb-nodes={len(nodes)}, nb-edges={len(edges[0])}:{len(edges[1])}, nb-tweets={len(feats)}*{len(feats[0])}")
+    twft_for_users  = get_tweet_feat_for_user_nodes(model=embedding_method, num_topics=lda_k)
+    if not isinstance(twft_for_users, np.ndarray):
+        twft_for_users = np.array(twft_for_users)
+    feats = np.concatenate((twft_for_users[user_nodes], centroids_))
+    logger.info(f"New Homo Graph Info: nb-nodes={len(nodes)}, nb-edges={len(edges[0])}:{len(edges[1])}, nb-tweets={feats.shape}")
 
-    return nodes, edges, np.array(feats)
+    return nodes, edges, feats

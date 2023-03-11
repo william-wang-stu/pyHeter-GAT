@@ -89,6 +89,7 @@ parser.add_argument('--sample-ratio', type=int, default=1, help="Sampling Ratio 
 parser.add_argument('--selected-tags', type=str, default="all", help="Agg On Some Part of Hastags")
 parser.add_argument('--cluster-method', type=str, default="agg", help="Cluster Method, options are ['mbk', 'agg']")
 parser.add_argument('--agg-dist-thr', type=float, default=5.0, help="Distance Threshold used in Hierarchical Clustering Method")
+parser.add_argument('--embedding-method', type=str, default="bertopic", help="Embedding Method For Tweet Nodes")
 # >> Model
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--sparse-data', action='store_true', default=True, help="Use Sparse Data and Model (Only Valid When model='hypergat')")
@@ -101,6 +102,7 @@ parser.add_argument('--lr', type=float, default=3e-3, help='Initial learning rat
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
 parser.add_argument('--attn-dropout', type=float, default=0.1, help='Attn Dropout rate (1 - keep probability).')
+parser.add_argument('--unified-dim', type=int, default=64, help='Unified Dimension of Different Feature Spaces.')
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
 parser.add_argument('--stage', type=int, default=Ntimestage-1, help="Time Stage (0~Ntimestage-1)")
@@ -130,18 +132,25 @@ else:
     df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subdf_dp_20_100_ratio_35_20_2.p"))
 user_nodes = g.vs["label"]
 
-if isinstance(args.stage, int) and 0<=args.stage<=7:
-    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
-    user_tweet_mp = user_tweet_mp[args.stage]
-else:
-    # user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
-    user_tweet_mp = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/111ut_mp_filter_lt2words_processedforbert_subg.pkl")
+# if isinstance(args.stage, int) and 0<=args.stage<=7:
+#     user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/text/utmp_groupbystage.p"))
+#     user_tweet_mp = user_tweet_mp[args.stage]
+# else:
+#     user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+
+# TODO: consider args.stage when choosing tweet neighbors
+if args.embedding_method == 'lda':
+    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
+elif args.embedding_method == 'bertopic':
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_approx_distribution_reduce_auto_merge_lt01_subg.pkl"))
+    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/ut_mp_filter_lt2words_processedforbert_subg.pkl"))
+if not isinstance(tweet_features, np.ndarray):
+    tweet_features = np.array(tweet_features)
 
 structural_temporal_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
 deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), 208894)
 user_features = np.concatenate((structural_temporal_feats[user_nodes], deepwalk_feats[user_nodes]), axis=1)
-# tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
-tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_approx_distribution_reduce_auto_merge_lt01_subg.pkl"))
 if not isinstance(tweet_features, np.ndarray):
     tweet_features = np.array(tweet_features)
 logger.info(f"user-feats dim={user_features.shape[1]}, tweet-feats dim={tweet_features.shape[1]}")
@@ -194,7 +203,7 @@ if args.model == 'hetersparsegat' or args.model == 'hetergatwoconcatfeat':
     else:
         feats = extend_featspace2([user_features, tweet_features])
         hembs = [torch.FloatTensor(feat) for feat in feats]
-        model = HetergatWOConcatFeat(n_feats=[user_features.shape[1],tweet_features.shape[1]], n_units=n_units, n_heads=n_heads, shape_ret=(n_user,nb_classes),
+        model = HetergatWOConcatFeat(n_feats=[user_features.shape[1],tweet_features.shape[1]], n_unified=args.unified_dim, n_units=n_units, n_heads=n_heads, shape_ret=(n_user,nb_classes),
             attn_dropout=args.attn_dropout, dropout=args.dropout, instance_normalization=args.instance_normalization, sparse=args.sparse_data)
         logger.info(f"hadjs={hadjs[0].shape}:{hadjs[1].shape}, hembs={hembs[0].shape}:{hembs[1].shape}, n_user={n_user}, n_units={n_units}, n_heads={n_heads}")
         if args.cuda:
@@ -206,7 +215,7 @@ if args.model == 'hetersparsegat' or args.model == 'hetergatwoconcatfeat':
 
 elif args.model == 'hypergat':
     # tw_nodes: Nu+Nct, tw_edges: [(Nu+Nct)*(Nu+Nct),(Nu+Nct)*(Nu+Nct)], tw_feats: (Nu+Nct)*fct
-    tw_nodes, tw_edges, tw_feats = tweet_centralized_process(homo_g=g, user_tweet_mp=user_tweet_mp, tweet_features=tweet_features, clustering_algo=args.cluster_method, distance_threshold=args.agg_dist_thr)
+    tw_nodes, tw_edges, tw_feats = tweet_centralized_process(homo_g=g, user_tweet_mp=user_tweet_mp, tweet_features=tweet_features, embedding_method=args.embedding_method, clustering_algo=args.cluster_method, distance_threshold=args.agg_dist_thr)
     user_edges = tw_edges[0]
     full_edges = sum([tw_edges[0], tw_edges[1]], [])
     hadjs = [create_sparsemat_from_edgelist(edgelist=user_edges, m=n_user, n=n_user) if args.sparse_data else 
