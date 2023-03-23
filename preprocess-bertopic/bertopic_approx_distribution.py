@@ -15,7 +15,7 @@ topic_model = load_pickle(topic_model_filepath)
 
 suffix = topic_model_filepath.split('/')[-1][19:].split(".")[0]
 
-N_FRAC, n_docs = 20, len(docs)
+N_FRAC, n_docs = 30, len(docs)
 test_texts = docs[int(n_docs/N_FRAC*args.idx):int(n_docs/N_FRAC*(args.idx+1))]
 # topic_distr, _ = topic_model.approximate_distribution(test_texts, min_similarity=1e-5)
 # topic_distr = topic_distr.astype(np.float16) # save space and s/l time
