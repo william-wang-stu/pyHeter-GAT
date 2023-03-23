@@ -5,8 +5,10 @@ import os
 import random
 import torch
 import numpy as np
+import pandas as pd
 from scipy import sparse
 from typing import Any, Dict, List
+from itertools import combinations
 
 def init_graph(nb_nodes:int, edgelist:List[Any], is_directed:bool=False, outputfile_dirpath:str="", save_graph:bool=False):
     graph = igraph.Graph(nb_nodes, directed=is_directed)
@@ -246,3 +248,26 @@ def get_binary_mask(total_size, indices):
     mask = torch.zeros(total_size)
     mask[indices] = 1
     return mask.byte()
+
+def build_topic_similarity_user_edges(topic_labels:np.ndarray, ut_mp:dict):
+    # 1. Get Doc-Topic
+    # 2. Agg User-Topic
+    # ut_mp = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/ut_mp_filter_lt2words_processedforbert_subg.pkl")
+    user_ids = [[user]*len(tweet_ids) for user, tweet_ids in ut_mp.items()]
+    user_ids = [item for sublist in user_ids for item in sublist]
+
+    df = pd.DataFrame({
+        'Topic_ID': topic_labels,
+        'User_ID': user_ids,
+    })
+    # agg_topic_dict = df.groupby('User_ID').agg({'Topic_ID': set})['Topic_ID'].to_dict()
+    agg_user_dict = df.groupby('Topic_ID').agg({'User_ID': set})['User_ID'].to_dict() # {topic_id: {user_id1,user_id2,...}}
+    # df['Agg_Topic_ID'] = df['User_ID'].map(agg_topic_dict)
+
+    # 3. Build Full-Connected User-User Edges
+    user_edges_dict = {}
+    for key, value in agg_user_dict.items():
+        if key == -1: continue
+        user_edges_dict[key] = list(combinations(value, r=2))
+    
+    return user_edges_dict

@@ -143,13 +143,13 @@ if args.embedding_method == 'lda':
     user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
     tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
 elif args.embedding_method == 'bertopic':
-    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_approx_distribution_reduce_auto_merge_lt01_subg.pkl"))
     user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/ut_mp_filter_lt2words_processedforbert_subg.pkl"))
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_approx_distribution_reduce_auto_merge_lt01_subg.pkl"))
 if not isinstance(tweet_features, np.ndarray):
     tweet_features = np.array(tweet_features)
 
 structural_temporal_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
-deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), 208894)
+deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), max_idx=user_nodes[-1])
 user_features = np.concatenate((structural_temporal_feats[user_nodes], deepwalk_feats[user_nodes]), axis=1)
 if not isinstance(tweet_features, np.ndarray):
     tweet_features = np.array(tweet_features)

@@ -160,6 +160,21 @@ def merge_similar_topics(topic_model:BERTopic, docs:List, merge_thr:float=0.1) -
     # topic_model.get_topic_tree(hierarchical_topics)
     return topic_model
 
+def update_topic_reprs(topic_model:BERTopic, docs:List, ) -> BERTopic:
+    import emoji
+    demojize_texts = ['_'+demojize_text[1:-1]+'_' for demojize_text in emoji.get_emoji_unicode_dict(lang='en').keys()]
+
+    from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+    # from nltk.corpus import stopwords
+    # stop_words_list = stopwords.words('english') # 获取英文停用词列表
+
+    stop_words = set(ENGLISH_STOP_WORDS) | set(demojize_texts)
+    logger.info(f"stop_words={len(stop_words)}, ENGLISH_STOP_WORDS={len(ENGLISH_STOP_WORDS)}, demojize_texts={len(demojize_texts)}")
+    vectorizer_model = CountVectorizer(ngram_range=(1,3), stop_words=list(stop_words))
+
+    topic_model.update_topics(docs=docs, vectorizer_model=vectorizer_model)
+    return topic_model
+
 def calculate_coherence_score(docs, topics, topic_model:BERTopic):
     """
     How to get Args, i.e. docs, topics and topic_model? Use Bertopic as example...
