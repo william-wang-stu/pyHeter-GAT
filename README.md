@@ -8,3 +8,45 @@
 ### Github 仓库提交
 1. 显然, 1)在Git账户下添加当前机器生成的SSH公钥, 2)使用ssh协议(.git后缀)访问远程仓库, 能够克服Github仓库网络连接的问题
 2. 同时, 经过测试, 仅使用命令`ssh-keygen`生成的公钥也是能行的, 不用一定加上`-C 邮箱`的
+
+### 裸机环境配置
+1. Git配置
+- 把当前机器的公钥加入[SSH Keys](https://github.com/settings/keys)
+- `git@github.com:william-wang-stu/pyHeter-GAT.git`
+
+2. 环境配置
+
+- 换源: [清华源](https://mirrors.tuna.tsinghua.edu.cn/help/ubuntu/)
+```bash
+vi /etc/apt/sources.list
+# https://mirrors.tuna.tsinghua.edu.cn/help/ubuntu/
+source /etc/apt/sources.list
+```
+
+- PipFile
+```bash
+pipenv install
+# https://pytorch.org/get-started/previous-versions/
+pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
+pip install -e .
+```
+
+-  Conda
+```bash
+# 检查nvcc版本
+nvcc --version
+# 如提示nvcc command not found
+# export PATH="$PATH:/usr/local/cuda/bin"
+# export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda/lib64"
+# source ~/.bashrc
+conda env create --file environment.yml --yes
+conda develop .
+```
+
+3. src/目录下创建数据配置文件
+- src/config.ini
+```bash
+[DEFAULT]
+DataRootPath = /remote-home/share/dmb_nas/wangzejian/
+Ntimestage = 8
+```
