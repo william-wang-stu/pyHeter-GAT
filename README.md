@@ -13,6 +13,14 @@
 1. Git配置
 - 把当前机器的公钥加入[SSH Keys](https://github.com/settings/keys)
 - `git@github.com:william-wang-stu/pyHeter-GAT.git`
+- 加入~/.gitconfig文件
+```bash
+[http]
+	postBuffer = 524288000
+[user]
+	email = 2625421542@qq.com
+	name = william-wang-stu
+```
 
 2. 环境配置
 
