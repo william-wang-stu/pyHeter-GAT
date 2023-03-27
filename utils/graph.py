@@ -3,11 +3,12 @@ from lib.log import logger
 import igraph
 import os
 import random
+import re
 import torch
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from itertools import combinations
 
 def init_graph(nb_nodes:int, edgelist:List[Any], is_directed:bool=False, outputfile_dirpath:str="", save_graph:bool=False):
@@ -248,6 +249,93 @@ def get_binary_mask(total_size, indices):
     mask = torch.zeros(total_size)
     mask[indices] = 1
     return mask.byte()
+
+def search_cascades(user_texts_mp:Dict[int,dict], subg:igraph.Graph)->Dict[int,list]:
+    """
+    功能: 将符合相同条件的推文组织为同一话题级联, 这些条件包括,
+        1. 包含相同tag, i.e. #blacklivesmatter
+        2. 包含相同url, i.e. 
+        3. 用"RT @USER"形式标识的多个文本内容相同的推文
+    """
+    userid2graphid = {user_id:graph_id for graph_id, user_id in enumerate(subg.vs["label"])}
+    timelines_tag = aggby_same_text(user_texts_mp, regex_pattern=r'(#\w+)', userid2graphid=userid2graphid)
+    timelines_url = aggby_same_text(user_texts_mp, regex_pattern=r'(https?://[a-zA-Z0-9.?/&=:]+)', userid2graphid=userid2graphid)
+    def preprocess(timelines:Dict[int,list], min_user_participate:int, max_user_participate:int)->Dict[int,list]:
+        # Sort by Timestamp
+        timelines = {key:sorted(value, key=lambda elem:elem[1]) for key,value in timelines.items()}
+        # Remove Too Short or Too Long Cascades By Unique User-Nums
+        user_participate_mp = {key:len(set([elem[0] for elem in value])) for key,value in timelines.items()}
+        if max_user_participate < min_user_participate:
+            max_user_participate = max([elem for elem in user_participate_mp.values()])
+        timelines = {key:value for key,value in timelines.items() if user_participate_mp[key]>=min_user_participate and user_participate_mp[key]<=max_user_participate}
+        return timelines
+    timelines_tag = preprocess(timelines_tag, min_user_participate=5, max_user_participate=2000)
+    timelines_url = preprocess(timelines_url, min_user_participate=5, max_user_participate=-1)
+    return timelines_tag, timelines_url, None
+
+def aggby_same_text(user_texts_mp:Dict[int,dict], regex_pattern:str, userid2graphid:Dict[int,int])->Dict[int,list]:
+    """
+    参数: 
+        user_texts_mp: { user_id: { text_id: {'timestamp': , 'text': ,}, { text_id2: {} }, ... }, ... }
+        regex_pattern: 过滤话题级联的正则表达式模式
+            i.e. tag_pattern = r'(#\w+)', url_pattern = r'(https?://[a-zA-Z0-9.?/&=:]+)'
+        userid2graphid: 原始拓扑图(v=208894)与采样子图(v=44896)的节点ID对应关系
+            i.e. userid2graphid={user_id:graph_id for graph_id, user_id in enumerate(subg.vs["label"])}
+    返回值:
+        timelines: { tag: [(u1,t1),...], tag2:... }
+    """
+    valid_users = list(userid2graphid.keys())
+    timelines:Dict[int,list] = {}
+
+    for user_id, raw_texts in user_texts_mp.items():
+        if user_id not in valid_users:
+            continue
+        for _, text in raw_texts.items():
+            group = re.finditer(regex_pattern, text['text'])
+            if group is None:
+                continue
+            for match in group:
+                end_pos = match.span()[1]
+                # incomplete tags shouldnt been recorded
+                if end_pos == len(text['text'])-1 and text['text'][-1] == '…':
+                    continue
+                tag = match.group(1).lower()
+                tag = tag.replace('…', '') # remove not filtered '…'
+                if tag not in timelines:
+                    timelines[tag] = []
+                timelines[tag].append((userid2graphid[user_id], text['timestamp']))
+    return timelines
+
+def aggby_retweet_info(user_texts_mp:Dict[int,dict], userid2graphid:Dict[int,int]):
+    """
+    思路: 将去掉"RT @USER"形式后, 包含相同文本内容的推文组织成级联
+
+    """
+    # Aggregate RT Info
+    retweet_pattern = r'RT @\w+: (.+)'
+    timelines = aggby_same_text(user_texts_mp=user_texts_mp, regex_pattern=retweet_pattern, userid2graphid=userid2graphid)
+
+    # Search for Possible Original Tweets
+    valid_users = list(userid2graphid.keys())
+    for retweet, _ in timelines.items():
+        for user_id, raw_texts in user_texts_mp.items():
+            if user_id not in valid_users:
+                continue
+            for _, text in raw_texts.items():
+                if text['text'].lower() == retweet:
+                    timelines[retweet].append((userid2graphid[user_id], text['timestamp']))
+
+    return timelines
+
+def find_tweet_by_cascade_info(user_texts_mp:Dict[int,dict], user_id:int, timestamp:int)->str:
+    """
+    Usage: find_tweet_by_cascade_info(user_texts_mp=user_texts, user_id=subg.vs[user]["label"], timestamp=ts)
+    """
+    texts = user_texts_mp[user_id]
+    for _, text in texts.items():
+        if text['timestamp'] == timestamp:
+            return text['text']
+    return None
 
 def build_topic_similarity_user_edges(topic_labels:np.ndarray, ut_mp:dict):
     # 1. Get Doc-Topic
