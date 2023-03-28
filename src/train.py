@@ -125,7 +125,8 @@ if args.cuda:
 # Stage: Data Preparation
 if not args.sota_test:
     g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_subgraph.p")) # Total 44896 User Nodes
-    df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_df.p"))
+    # df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_df.p"))
+    df = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_cascades/deg_le483_timeline_aggby_url_tag.pkl"))
 else:
     # Sota-Test uses a down-sampled version of normal dataset, and corresponding down-sample-ratio is clarified in its filename
     g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subg_dp_20_100_ratio_35_20_2.p"))

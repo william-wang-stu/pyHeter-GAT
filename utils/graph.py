@@ -250,6 +250,16 @@ def get_binary_mask(total_size, indices):
     mask[indices] = 1
     return mask.byte()
 
+def preprocess_timelines_byusernum(timelines:Dict[int,list], min_user_participate:int, max_user_participate:int)->Dict[int,list]:
+    # Sort by Timestamp
+    timelines = {key:sorted(value, key=lambda elem:elem[1]) for key,value in timelines.items()}
+    # Remove Too Short or Too Long Cascades By Unique User-Nums
+    user_participate_mp = {key:len(set([elem[0] for elem in value])) for key,value in timelines.items()}
+    if max_user_participate < min_user_participate:
+        max_user_participate = max([elem for elem in user_participate_mp.values()])
+    timelines = {key:value for key,value in timelines.items() if user_participate_mp[key]>=min_user_participate and user_participate_mp[key]<=max_user_participate}
+    return timelines
+
 def search_cascades(user_texts_mp:Dict[int,dict], subg:igraph.Graph)->Dict[int,list]:
     """
     功能: 将符合相同条件的推文组织为同一话题级联, 这些条件包括,
@@ -260,18 +270,12 @@ def search_cascades(user_texts_mp:Dict[int,dict], subg:igraph.Graph)->Dict[int,l
     userid2graphid = {user_id:graph_id for graph_id, user_id in enumerate(subg.vs["label"])}
     timelines_tag = aggby_same_text(user_texts_mp, regex_pattern=r'(#\w+)', userid2graphid=userid2graphid)
     timelines_url = aggby_same_text(user_texts_mp, regex_pattern=r'(https?://[a-zA-Z0-9.?/&=:]+)', userid2graphid=userid2graphid)
-    def preprocess(timelines:Dict[int,list], min_user_participate:int, max_user_participate:int)->Dict[int,list]:
-        # Sort by Timestamp
-        timelines = {key:sorted(value, key=lambda elem:elem[1]) for key,value in timelines.items()}
-        # Remove Too Short or Too Long Cascades By Unique User-Nums
-        user_participate_mp = {key:len(set([elem[0] for elem in value])) for key,value in timelines.items()}
-        if max_user_participate < min_user_participate:
-            max_user_participate = max([elem for elem in user_participate_mp.values()])
-        timelines = {key:value for key,value in timelines.items() if user_participate_mp[key]>=min_user_participate and user_participate_mp[key]<=max_user_participate}
-        return timelines
-    timelines_tag = preprocess(timelines_tag, min_user_participate=5, max_user_participate=2000)
-    timelines_url = preprocess(timelines_url, min_user_participate=5, max_user_participate=-1)
-    return timelines_tag, timelines_url, None
+
+    timelines_tag = preprocess_timelines_byusernum(timelines_tag, min_user_participate=5, max_user_participate=2000)
+    timelines_url = preprocess_timelines_byusernum(timelines_url, min_user_participate=5, max_user_participate=-1)
+    # NOTE: 'RT @USER: '这一方式得到的级联基本被TAG级联和URL级联所覆盖, 因此不再采用这种方式构造级联
+    # timelines_retweet = aggby_retweet_info(user_texts_mp, userid2graphid)
+    return timelines_tag, timelines_url
 
 def aggby_same_text(user_texts_mp:Dict[int,dict], regex_pattern:str, userid2graphid:Dict[int,int])->Dict[int,list]:
     """
@@ -308,12 +312,15 @@ def aggby_same_text(user_texts_mp:Dict[int,dict], regex_pattern:str, userid2grap
 
 def aggby_retweet_info(user_texts_mp:Dict[int,dict], userid2graphid:Dict[int,int]):
     """
-    思路: 将去掉"RT @USER"形式后, 包含相同文本内容的推文组织成级联
-
+    思路: 将去掉"RT @USER: "形式后, 包含相同文本内容的推文组织成级联
+        1. 先将包含"RT @USER: "形式的推文找出来, 并聚合形成级联;
+        2. 再针对每个上述级联, 暴力搜索所有推文, 查找是否存在这些转发推文的原始推文, 如果存在则加入该级联中.
     """
     # Aggregate RT Info
     retweet_pattern = r'RT @\w+: (.+)'
     timelines = aggby_same_text(user_texts_mp=user_texts_mp, regex_pattern=retweet_pattern, userid2graphid=userid2graphid)
+    timelines = {key:value for key,value in timelines.items() if key[0]!='#' and len(key)>15}
+    timelines = preprocess_timelines_byusernum(timelines, min_user_participate=100, max_user_participate=0)
 
     # Search for Possible Original Tweets
     valid_users = list(userid2graphid.keys())
@@ -324,6 +331,7 @@ def aggby_retweet_info(user_texts_mp:Dict[int,dict], userid2graphid:Dict[int,int
             for _, text in raw_texts.items():
                 if text['text'].lower() == retweet:
                     timelines[retweet].append((userid2graphid[user_id], text['timestamp']))
+                    logger.info(f"retweet={retweet}, length={len(timelines[retweet])}")
 
     return timelines
 
