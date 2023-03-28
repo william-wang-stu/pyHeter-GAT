@@ -28,15 +28,21 @@
 ```bash
 vi /etc/apt/sources.list
 # https://mirrors.tuna.tsinghua.edu.cn/help/ubuntu/
-source /etc/apt/sources.list
+apt-get update
+# 如提示Err:9 https://mirrors.tuna.tsinghua.edu.cn/ubuntu bionic-backports Release Certificate verification failed: The certificate is NOT trusted. The certificate chain uses expired certificate.
+# https://github.com/tuna/issues/issues/1342
 ```
 
 - PipFile
 ```bash
+pip install pipenv
 pipenv install
 # https://pytorch.org/get-started/previous-versions/
+# 切换到pyHeter-GAT环境里执行安装pytorch
 pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
 pip install -e .
+
+# pipenv环境安装出现了不可复现的问题, 猜测和网络相关, 盯着它重试即可:D
 ```
 
 -  Conda
@@ -47,7 +53,10 @@ nvcc --version
 # export PATH="$PATH:/usr/local/cuda/bin"
 # export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/cuda/lib64"
 # source ~/.bashrc
-conda env create --file environment.yml --yes
+
+conda env create --file environment.yml
+
+# >>> rapids-23.02环境 + ~/pyHeter-GAT路径下执行下列操作
 conda develop .
 ```
 
