@@ -11,6 +11,7 @@ from sklearn.cluster import KMeans, AgglomerativeClustering, MiniBatchKMeans
 from sklearn.neighbors import NearestCentroid, KNeighborsClassifier
 from sklearn.decomposition import PCA
 from matplotlib import colors
+from typing import Tuple
 
 def get_centroids(X, y):
     nb_kind = len(np.unique(y))
@@ -125,7 +126,7 @@ def get_tweet_feat_for_user_nodes(model='lda', num_topics=25) -> np.ndarray:
     save_pickle(twft, twft_filepath)
     return twft
 
-def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, embedding_method, clustering_algo, distance_threshold):
+def tweet_centralized_process(homo_g, user_tweet_mp, tweet_features, embedding_method, clustering_algo, distance_threshold)->Tuple[dict,list,np.ndarray]:
     # 1. prepare tweet feature
     lda_k = tweet_features.shape[1]
 

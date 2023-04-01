@@ -14,13 +14,14 @@ topic_model_filepath = "/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-emb
 topic_model = load_pickle(topic_model_filepath)
 
 suffix = topic_model_filepath.split('/')[-1][19:].split(".")[0]
+logger.info(f"suffix={suffix}")
 
-N_FRAC, n_docs = 30, len(docs)
+N_FRAC, n_docs = 10, len(docs)
 test_texts = docs[int(n_docs/N_FRAC*args.idx):int(n_docs/N_FRAC*(args.idx+1))]
-# topic_distr, _ = topic_model.approximate_distribution(test_texts, min_similarity=1e-5)
-# topic_distr = topic_distr.astype(np.float16) # save space and s/l time
-# save_pickle(topic_distr, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_distribution{args.idx}{suffix}.pkl")
-# logger.info("Complete Distribution...")
+topic_distr, _ = topic_model.approximate_distribution(test_texts, min_similarity=1e-5)
+topic_distr = topic_distr.astype(np.float16) # save space and s/l time
+save_pickle(topic_distr, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_distribution{args.idx}{suffix}.pkl")
+logger.info("Complete Distribution...")
 
 labels, probs = topic_model.transform(test_texts)
 save_pickle(labels, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_label{args.idx}{suffix}.pkl")
@@ -36,7 +37,7 @@ if args.idx == N_FRAC-1:
         label = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_label{idx}{suffix}.pkl")
         prob = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_prob{idx}{suffix}.pkl")
         distr = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_distribution{idx}{suffix}.pkl")
-        whole_prob.extend(prob); whole_label.extend(label); whole_distr.append(distr)
+        whole_prob.extend(prob); whole_label.extend(label); whole_distr.extend(distr)
 
     save_pickle(whole_label, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_label{suffix}.pkl")
     save_pickle(whole_prob, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_prob{suffix}.pkl")

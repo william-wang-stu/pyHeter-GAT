@@ -14,9 +14,9 @@ import configparser
 from scipy import sparse
 from typing import Any, Dict, List
 from itertools import combinations, chain
-from numba import njit
-from numba import types
-from numba.typed import Dict, List
+# from numba import njit
+# from numba import types
+# from numba.typed import Dict, List
 
 config = configparser.ConfigParser()
 # NOTE: realpath(__file__)是在获取执行这段代码所属文件的绝对路径, 即~/pyHeter-GAT/src/config.ini
@@ -66,6 +66,9 @@ def wrap(func):
         # logger.info(f"func={func}, args={args}, kwargs={kwargs}")
         return func(*args, mode="out", **kwargs)
     return inner
+
+def normalize(feat:np.ndarray):
+    return feat/(np.linalg.norm(feat,axis=1)+1e-10).reshape(-1,1)
 
 def load_w2v_feature(file, max_idx=0):
     with open(file, "rb") as f:
