@@ -21,7 +21,7 @@ from utils.utils import *
 from utils.graph import *
 from utils.tweet_clustering import tweet_centralized_process
 from src.model import HeterSparseGAT, HyperGAT, HyperGATWithHeterSparseGAT
-from src.model_batchdensegat import BatchDenseGAT, BatchGAT
+from src.model_batchdensegat import BatchDenseGAT
 from src.data_loader import InfluenceDataSet, ChunkSampler
 import numpy as np
 import argparse
@@ -97,18 +97,20 @@ else:
     timelines = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subdf_dp_20_100_ratio_35_20_2.p"))
 user_nodes = g.vs["label"]
 
-# structural_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/vertex_feature_subgle483.npy"))
-# struc_cascade_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
-# deepwalk_feats = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), max_idx=user_nodes[-1]+1)
-# fn = lambda val,ind: val if len(val)==len(ind) else val[ind]
-# user_features = np.concatenate((
-#     fn(normalize(structural_feats),ind=user_nodes), 
-#     fn(normalize(struc_cascade_feats),ind=user_nodes), 
-#     fn(normalize(deepwalk_feats),ind=user_nodes)), axis=1)
+structural_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/vertex_feature_subgle483.npy"))
+struc_cascade_feats = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
+deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), max_idx=user_nodes[-1]+1)
 
-vertex_feat = load_pickle("/remote-home/share/dmb_nas/wangzejian/digg/digg/vertex_feature.npy")
-vertex_feat = preprocessing.scale(vertex_feat)
-deepwalk_feat = load_w2v_feature("/remote-home/share/dmb_nas/wangzejian/digg/digg/deepwalk.emb_64", max_idx=vertex_feat.shape[0]-1)
+fn = lambda val,ind: val if len(val)==len(ind) else val[ind]
+structural_feat = fn(structural_feat, ind=user_nodes)
+structural_feat = preprocessing.scale(structural_feat)
+struc_cascade_feats = fn(struc_cascade_feats, ind=user_nodes)
+struc_cascade_feats = preprocessing.scale(struc_cascade_feats)
+deepwalk_feat = fn(deepwalk_feat, ind=user_nodes)
+
+# vertex_feat = load_pickle("/remote-home/share/dmb_nas/wangzejian/digg/digg/vertex_feature.npy")
+# vertex_feat = preprocessing.scale(vertex_feat)
+# deepwalk_feat = load_w2v_feature("/remote-home/share/dmb_nas/wangzejian/digg/digg/deepwalk.emb_64", max_idx=vertex_feat.shape[0]-1)
 
 # TODO: consider args.stage when choosing tweet neighbors
 # if isinstance(args.stage, int) and 0<=args.stage<=7:
@@ -138,8 +140,8 @@ logger.info('tensorboard logging to %s', tensorboard_log_dir)
 # Stage: Data Processing
 if args.model == 'batchdensegat':
     influence_dataset = InfluenceDataSet(
-        # file_dir=os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subgraph_sampling/subg_inf_5_400_deg_3_62_ego_49_neg_1_restart_0.2_1000"),
-        file_dir="/remote-home/share/dmb_nas/wangzejian/digg/digg",
+        file_dir=os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subgraph_sampling/subg_inf_5_400_deg_3_62_ego_49_neg_1_restart_0.2_1000"),
+        # file_dir="/remote-home/share/dmb_nas/wangzejian/digg/digg",
         seed=args.seed, shuffle=args.shuffle, model='gat')
 # elif args.model == 'batchgat':
 #     influence_dataset = InfluenceDataSet2(
@@ -162,12 +164,12 @@ n_units = [int(x) for x in args.hidden_units.strip().split(",")]
 n_heads = [int(x) for x in args.heads.strip().split(",")]
 
 if args.model == 'batchdensegat':
-    global_embs = [torch.FloatTensor(vertex_feat), torch.FloatTensor(deepwalk_feat)]
-    n_feat = vertex_feat.shape[1]+deepwalk_feat.shape[1]+influence_dataset.get_influence_feature_dimension()
+    global_embs = [torch.FloatTensor(structural_feat), torch.FloatTensor(deepwalk_feat), torch.FloatTensor(struc_cascade_feats)]
+    n_feat = structural_feat.shape[1]+struc_cascade_feats.shape[1]+deepwalk_feat.shape[1]+influence_dataset.get_influence_feature_dimension()
     n_units = [int(x) for x in args.hidden_units.strip().split(",")] + [nb_classes]
     n_heads = n_heads + [1]
     model = BatchDenseGAT(global_embs=global_embs, n_feat=n_feat, n_units=n_units, n_heads=n_heads, shape_ret=(n_user,nb_classes),
-        attn_dropout=args.attn_dropout, dropout=args.dropout, instance_normalization=args.instance_normalization, norm_mask=[0,1], fine_tune=args.fine_tune)
+        attn_dropout=args.attn_dropout, dropout=args.dropout, instance_normalization=args.instance_normalization, norm_mask=[0,1,0], fine_tune=args.fine_tune)
     logger.info(f"n_user={n_user}, n_feat={n_feat}, n_units={n_units}, n_heads={n_heads}, shape_ret={(n_user,nb_classes)}")
     
 # elif args.model == 'batchgat':
