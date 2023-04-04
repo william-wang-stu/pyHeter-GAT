@@ -67,6 +67,9 @@ def wrap(func):
         return func(*args, mode="out", **kwargs)
     return inner
 
+def flattern(ll:List[list]):
+    return [item for sublist in ll for item in sublist]
+
 def normalize(feat:np.ndarray):
     return feat/(np.linalg.norm(feat,axis=1)+1e-10).reshape(-1,1)
 
@@ -108,6 +111,7 @@ def sample_docs_foreachuser2(docs, sample_frac=0.01, min_sample_num=3):
     for texts in docs:
         if len(texts) == 0:
             continue
+        texts = list(set(texts))
         sample_num = int(sample_frac*len(texts))
         sample_texts = random.choices(texts, k=max(sample_num, min_sample_num))
         sample_docs.extend(sample_texts)

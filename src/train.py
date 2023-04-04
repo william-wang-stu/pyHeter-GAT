@@ -256,7 +256,7 @@ elif args.model == 'hypergat':
     hadjs = [get_sparse_tensor(hadj.tocoo()) if args.sparse_data else torch.BoolTensor(hadj) for hadj in hadjs]
 
     fn = lambda val, ind: val if len(val)==len(ind) else val[ind]
-    user_features = np.concatenate((structural_feat,struc_cascade_feats,deepwalk_feat),axis=1)
+    user_features = np.concatenate((structural_feat,struc_cascade_feat,deepwalk_feat),axis=1)
     user_features = fn(user_features, user_nodes)
     hembs = [torch.FloatTensor(user_features), torch.FloatTensor(tw_feats),]
     model = HyperGAT(n_feats=[user_features.shape[1], tw_feats.shape[1]], n_units=n_units, n_heads=n_heads, shape_ret=(n_user,nb_classes),
@@ -281,7 +281,7 @@ elif args.model == 'hypergatwithhetersparsegat':
     hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
     
     fn = lambda val, ind: val if len(val)==len(ind) else val[ind]
-    user_features = np.concatenate((structural_feat,struc_cascade_feats,deepwalk_feat),axis=1)
+    user_features = np.concatenate((structural_feat,struc_cascade_feat,deepwalk_feat),axis=1)
     user_features  = fn(user_features, user_nodes)
     tweet_features = tw_feats[n_user:] # (Nu+Nct,fct) -> (Nct,fct)
     feats = extend_featspace([user_features, tweet_features]) # (Nu,fu), (Nct,fct) -> (Nu+Nct,fu+fct) 
@@ -305,7 +305,7 @@ def save_model(epoch, args, model, optimizer):
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict()
     }
-    save_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/ckpt_epoch{epoch}_model.pkl")
+    save_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/ckpt_epoch_{epoch}_model_{args.model}.pkl")
     torch.save(state, save_filepath)
     # help release GPU memory
     del state

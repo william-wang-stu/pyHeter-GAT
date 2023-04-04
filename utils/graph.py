@@ -1,4 +1,4 @@
-from utils.utils import load_pickle, save_pickle
+from utils.utils import load_pickle, save_pickle, flattern
 from lib.log import logger
 import igraph
 import os
@@ -345,25 +345,71 @@ def find_tweet_by_cascade_info(user_texts_mp:Dict[int,dict], user_id:int, timest
             return text['text']
     return None
 
-def build_topic_similarity_user_edges(topic_labels:np.ndarray, ut_mp:dict):
+def build_topic_similarity_user_edges(ut_mp:dict):
     # 1. Get Doc-Topic
-    # 2. Agg User-Topic
+    suffix = f"remove_hyphen_reduce_auto"
+    docs = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/raw_texts_aggby_user_filter_lt2words_process_remove_hyphen.pkl")
+    docs = flattern(docs)
+    topic_labels = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_label_{suffix}.pkl")
+    topic_probs  = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_prob_{suffix}.pkl")
+    topic_reprs  = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/bertopic/topic_representation_{suffix}.pkl")
+
     # ut_mp = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/ut_mp_filter_lt2words_processedforbert_subg.pkl")
     user_ids = [[user]*len(tweet_ids) for user, tweet_ids in ut_mp.items()]
-    user_ids = [item for sublist in user_ids for item in sublist]
+    user_ids = flattern(user_ids)
+    n_user = len(ut_mp)
 
+    # 2. 
     df = pd.DataFrame({
-        'Topic_ID': topic_labels,
-        'User_ID': user_ids,
+        'Doc'       : docs,
+        'Topic_ID'  : topic_labels,
+        'Topic_Prob': topic_probs,
+        'User_ID'   : user_ids,
     })
-    # agg_topic_dict = df.groupby('User_ID').agg({'Topic_ID': set})['Topic_ID'].to_dict()
-    agg_user_dict = df.groupby('Topic_ID').agg({'User_ID': set})['User_ID'].to_dict() # {topic_id: {user_id1,user_id2,...}}
-    # df['Agg_Topic_ID'] = df['User_ID'].map(agg_topic_dict)
+    df['Top_N_Words'] = df['Topic'].map(topic_reprs)
 
-    # 3. Build Full-Connected User-User Edges
+    # 3. Filter
+    # 3.1 Remove those topics spanning across too many users
+    # Aggregate Users by Topic-Labels
+    agg_user_dict = df.groupby('Topic_ID').agg({'User_ID': set})['User_ID'].to_dict()
+    # df['Agg_Topic_ID'] = df['User_ID'].map(agg_topic_dict)
+    too_many_user_topics = [topic for topic,users in agg_user_dict.items() if len(users)>int(0.5*n_user)]
+    logger.info(f"Remove Topics spanning across too many users... Topics={too_many_user_topics}")
+    df = df[~df['Topic_ID'].isin(too_many_user_topics)]
+    # df_1 = df[~df['Topic_ID'].isin(too_many_user_topics)]
+    # logger.info(f"Docs Number Before={len(df)}, After={len(df_1)}")
+
+    # 3.2 Remove those topics including too few tweets
+    tweet_num_per_topic = df.groupby(['Topic_ID'])['Topic_ID'].count().to_dict()
+    too_few_tweet_topics = [topic for topic,tweet_num in tweet_num_per_topic.items() if tweet_num<10]
+    logger.info(f"Remove Topics including too few tweets... Topics={too_few_tweet_topics}")
+    df = df[~df['Topic_ID'].isin(too_few_tweet_topics)]
+
+    # 3.3 Remove those users not having strong association with other users within topics
+    # 3.4 Remove those short-period topics
+
+    # 4. Build Full-Connected User-User Edges
     user_edges_dict = {}
+    agg_user_dict = df.groupby('Topic_ID').agg({'User_ID': set})['User_ID'].to_dict()
     for key, value in agg_user_dict.items():
-        if key == -1: continue
         user_edges_dict[key] = list(combinations(value, r=2))
     
     return user_edges_dict
+
+def build_sim_edges(tag2cluster:Dict[int,list], timelines:Dict[int,list], topic2aggusers:Dict[int,set]):
+    sim_edges = {}
+    for tag,values in timelines.items():
+        similar_topics = tag2cluster[tag]
+        similar_topics = [elem for elem in similar_topics if elem[1]>=0.3]
+        
+        user_set = set([elem[0] for elem in values])
+        valid_user_pairs = list(combinations(user_set, r=2))
+
+        user_pairs = []
+        for topic in similar_topics:
+            agg_users = topic2aggusers[topic]
+            agg_users &= valid_user_pairs
+            user_pairs.extend(agg_users)
+        
+        sim_edges[tag] = user_pairs
+    return sim_edges

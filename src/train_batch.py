@@ -201,7 +201,7 @@ def save_model(epoch, args, model, optimizer):
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict()
     }
-    save_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/ckpt_epoch{epoch}_model_{args.model}.pkl")
+    save_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/ckpt_epoch_{epoch}_model_{args.model}.pkl")
     torch.save(state, save_filepath)
     # help release GPU memory
     del state
