@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 # from dgl.nn.pytorch import GATConv, GATv2Conv
-from typing import List
+from typing import List, Union
 
 class MultiHeadGraphAttention(nn.Module):
     def __init__(self, n_head, f_in, f_out, attn_dropout, bias=True):
@@ -124,6 +124,62 @@ class SpGATLayer(nn.Module):
         else:
             return out
 
+class DenseGAT(nn.Module):
+    def __init__(
+        self, static_nfeat, dynamic_nfeats, n_units, n_heads, shape_ret,
+        attn_dropout, dropout, instance_normalization=False,
+    ) -> None:
+        """
+        Arguments:
+            n_units: contains hidden unit dimension of each layer
+            n_heads: contains attention head number of each layer
+            shape_ret: (n_user,nb_classes=2), contains shape of required return tensor
+        """
+        super().__init__()
+
+        self.dropout = dropout
+        self.inst_norm = instance_normalization
+        if self.inst_norm:
+            for i, dynamic_nfeat in enumerate(dynamic_nfeats):
+                norm = nn.InstanceNorm1d(dynamic_nfeat, momentum=0.0, affine=True)
+                setattr(self, f"norm-{i}", norm)
+
+        n_feat = static_nfeat+ sum(dynamic_nfeats)
+        self.layer_stack = self._build_layer_stack(extend_units=[n_feat]+n_units, n_heads=n_heads, attn_dropout=attn_dropout)
+        # self.fc_layer = nn.Linear(in_features=n_units[-1], out_features=shape_ret[1])
+    
+    def _build_layer_stack(self, extend_units, n_heads, attn_dropout):
+        layer_stack = nn.ModuleList()
+        for n_unit, n_head, f_out, fin_head in zip(extend_units[:-1], n_heads, extend_units[1:], [None]+n_heads[:-1]):
+            f_in = n_unit*fin_head if fin_head is not None else n_unit
+            layer_stack.append(
+                SpGATLayer(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout),
+            )
+        return layer_stack
+
+    def forward(self, adj:torch.Tensor, static_emb:torch.Tensor, dynamic_embs:List[torch.Tensor]):
+        # adj: n*n, emb: n*n_feat
+        norm_embs = []
+        for i, dynamic_emb in enumerate(dynamic_embs):
+            norm_emb = dynamic_emb
+            if self.inst_norm:
+                norm = getattr(self, f"norm-{i}")
+                norm_emb = norm(norm_emb.transpose(0,1)).transpose(0,1)
+            norm_embs.append(norm_emb)
+        emb = torch.cat(norm_embs, dim=1)
+        emb = torch.cat((emb,static_emb),dim=1)
+
+        n = adj.shape[1]
+        for i, gat_layer in enumerate(self.layer_stack):
+            emb = gat_layer(emb, adj) # n_head*n*f_out
+            if i+1 == len(self.layer_stack):
+                emb = emb.mean(dim=1) # n*f_out
+            else:
+                emb = F.elu(emb.reshape(n, -1)) # n*(n_head*f_out)
+                emb = F.dropout(emb, self.dropout, training=self.training)
+        # emb = self.fc_layer(emb) # bs*n*shape_ret[1]
+        return F.log_softmax(emb, dim=-1)
+
 class AdditiveAttention(nn.Module):
     def __init__(self, d, d1, d2) -> None:
         super().__init__()
@@ -160,7 +216,7 @@ class HeterSparseGAT(nn.Module):
     特点: 先把不同类型节点映射到统一特征空间维度中
     """
     def __init__(
-        self, n_feats, n_unified, n_units, n_heads, shape_ret,
+        self, n_feats, dynamic_nfeats, n_unified, n_units, n_heads, shape_ret,
         attn_dropout, dropout, instance_normalization=False, sparse=True, skip_fc=False,
     ) -> None:
         """
@@ -177,12 +233,12 @@ class HeterSparseGAT(nn.Module):
         self.inst_norm = instance_normalization
         self.skip_fc = skip_fc
         d1 = n_units[-1]
-        for i, n_feat in enumerate(n_feats):
+        for i, (n_feat, dynamic_nfeat) in enumerate(zip(n_feats, dynamic_nfeats)):
             weight_mat = nn.Parameter(torch.Tensor(n_feat, n_unified))
             nn.init.xavier_uniform_(weight_mat) # set initial values
             setattr(self, f"weight-mat-{i}", weight_mat)
             if self.inst_norm:
-                setattr(self, f"norm-{i}", nn.InstanceNorm1d(n_feat, momentum=0.0, affine=True))
+                setattr(self, f"norm-{i}", nn.InstanceNorm1d(dynamic_nfeat, momentum=0.0, affine=True))
         
         self.layer_stack = nn.ModuleList([
                 self._build_layer_stack(extend_units=[n_unified]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, sparse=sparse)
@@ -205,14 +261,21 @@ class HeterSparseGAT(nn.Module):
             # )
         return layer_stack
     
-    def forward(self, hadjs: torch.Tensor, hembs: List[torch.Tensor]): # hadj:(|Rs|,n,n), hembs:(|Rs|,n,f_in), f_in1!=f_in2
+    def forward(self, hadjs:torch.Tensor, static_hembs:Union[List[torch.Tensor],None], dynamic_hembs:List[torch.Tensor]): # hadj:(|Rs|,n,n), hembs:(|Rs|,n,f_in), f_in1!=f_in2
         trans_embs:List[torch.Tensor] = []
-        for i, hemb in enumerate(hembs):
-            weight_mat = getattr(self, f"weight-mat-{i}")
-            trans_emb = torch.matmul(hemb, weight_mat) # (n,f_in) -> (n,f_in_unified)
+        for i, (static_hemb, dynamic_hemb) in enumerate(zip(static_hembs, dynamic_hembs)):
+            trans_emb = dynamic_hemb
             if self.inst_norm:
                 norm = getattr(self, f"norm-{i}")
                 trans_emb = norm(trans_emb.transpose(0,1)).transpose(0,1)
+            # logger.info(f"norm={trans_emb.shape}")
+            if static_hemb is not None:
+                # logger.info(static_hemb.shape)
+                trans_emb = torch.cat((trans_emb, static_hemb), dim=-1)
+                # logger.info(f"static={trans_emb.shape}")
+            weight_mat = getattr(self, f"weight-mat-{i}")
+            trans_emb = torch.matmul(trans_emb, weight_mat) # (n,f_in) -> (n,f_in_unified)
+            # logger.info(f"tot={trans_emb.shape}")
             trans_embs.append(trans_emb)
 
         heter_embs = []
