@@ -1,4 +1,4 @@
-from utils.utils import DATA_ROOTPATH, load_pickle, save_pickle, sample_docs_foreachuser, sample_docs_foreachuser2
+from utils.utils import DATA_ROOTPATH, load_pickle, save_pickle, reduce_dimension, sample_docs_foreachuser, sample_docs_foreachuser2
 from lib.log import logger
 import random
 import os
@@ -9,6 +9,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 import pyLDAvis.sklearn
 import bitermplus
+import torch
 from gsdmm import MovieGroupProcess
 from bertopic import BERTopic
 from sentence_transformers import SentenceTransformer
@@ -20,6 +21,7 @@ from gensim.models.coherencemodel import CoherenceModel
 from gensim import corpora
 from octis.evaluation_metrics.coherence_metrics import Coherence
 from octis.evaluation_metrics.diversity_metrics import TopicDiversity
+from transformers import AutoTokenizer, AutoModelForMaskedLM
 
 def lda_model(raw_texts, num_topics, visualize):
     cv = CountVectorizer(stop_words="english")
@@ -253,3 +255,53 @@ def get_tweet_feat_for_tweet_nodes(model="lda", num_topics=20, visualize=False):
         if val is None:
             continue
         save_pickle(val, f"{key}_{suffix}.pkl")
+
+def agg_tagemb_by_user(n_user:int, cascades:dict, pretrained_model_name:str='xlm-roberta-base')->np.ndarray:
+    # Prepare Pretrained-LLM
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
+    model = AutoModelForMaskedLM.from_pretrained(pretrained_model_name)
+    if torch.cuda.is_available():
+        model = model.to('cuda')
+
+    # Per Hashtag
+    tag_embs = []
+    # tag2emb = {}
+    user2tagids = [[] for _ in range(n_user)]
+    for tag_id, tag in enumerate(sorted(cascades.keys())):
+        # Calculate Emb
+        with torch.no_grad():
+            tokens = tokenizer(tag, return_tensors='pt', padding=True)
+            if torch.cuda.is_available():
+                tokens = {
+                    'input_ids': tokens['input_ids'].to('cuda'),
+                    # 'token_type_ids': tokens['token_type_ids'].to('cuda'),
+                    'attention_mask': tokens['attention_mask'].to('cuda'),
+                }
+            output = model(**tokens)
+            embeds = output.logits.detach().cpu().numpy()
+            embeds = np.mean(embeds[0], axis=0, dtype=np.float16)
+        tag_embs.append(embeds)
+        # tag2emb[tag] = embeds
+        del tokens, output
+
+        # Accumulate User Appearance in Multiple Tags
+        cascade = cascades[tag]
+        for user_id, _ in cascade:
+            user2tagids[user_id].append(tag_id)
+    tag_embs = np.array(tag_embs)
+    
+    # Aggregate Tag Emb foreach User
+    user2emb = []
+    for tag_ids in user2tagids:
+        if len(tag_ids) != 0:
+            emb = np.mean(tag_embs[tag_ids], axis=0)
+        else:
+            emb = np.zeros(shape=tag_embs.shape[1])
+        user2emb.append(emb)
+    user2emb = np.array(user2emb)
+
+    # TODO: Reduce LLM Dimension
+    # NOTE: 1. Use Traditional dimension reduction methods, i.e. PCA; 2. Add FC-Layer in Total Model
+    if pretrained_model_name == 'xlm-roberta-base':
+        user2emb = reduce_dimension(user2emb)
+    return user2emb

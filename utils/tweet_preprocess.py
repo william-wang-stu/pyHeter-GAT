@@ -51,9 +51,9 @@ def fix_special_chars(text):
     return text
 
 def preprocess_text_forbert(text: str) -> str:
-    text = re.sub(r'RT @(\w+):', ' ', text) # remove retexts
-    text = re.sub(r'@[\w_]+', ' ', text) # remove at-links
-    text = re.sub(r'http(s?)://[a-zA-Z0-9.?/&=:]+', ' ', text) # remove urls
+    text = re.sub(r'RT @(\w+):', '_retweet_', text) # remove retexts
+    text = re.sub(r'@[\w_]+', '@user', text) # remove at-links
+    text = re.sub(r'http(s?)://[a-zA-Z0-9.?/&=:]+', '_httpurl_', text) # remove urls
     text = re.sub(r'\n', '', text) # remove new lines
     text = emoji.demojize(text, delimiters=(' _','_ ')) # demojize emojis, i.e. _broken_heart_
 

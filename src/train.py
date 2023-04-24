@@ -1,15 +1,3 @@
-"""
-总体思路: 
-1. 输入数据: 异质图网络, 异质图节点特征
--   使用子网训练测试, 每个子网Sample上仅包括User节点, 这里为子图中的每个节点随机选取若干(N=20)个Tweet节点一并用作测试
-    P.S. 注意此时子网大小为50Users+50*30Tweets=1550
-2. 网路
-3. 训练测试
-
-新:
-1. 以用户为中心的图注意力网络
-2. 以推文为中心的图注意力网络
-"""
 # NOTE: https://stackoverflow.com/a/56806766
 # import sys
 # import os
@@ -24,81 +12,84 @@ from src.model import DenseGAT, HeterSparseGAT, HyperGAT, HyperGATWithHeterSpars
 import numpy as np
 import argparse
 import shutil
-import random
 import time
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
+from itertools import chain
 from sklearn import preprocessing
+from sklearn.decomposition import PCA
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from torch.utils.tensorboard import SummaryWriter
 
 logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
 
-def load_labels(args, g, cascades):
+def load_labels(g:igraph.Graph, cascades:List[Tuple[int,int]], args:dict)->Union[None,Tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]]:
     """
     功能: 生成训练测试用的正负样本标签
     """
+
     # 1. 根据传播级联cascades生成正负样本, 且生成负样本时会做正负样本均衡
     # pos_users, neg_users = gen_pos_neg_users(g=g, cascades=cascades, sample_ratio=args.sample_ratio, stage=args.stage)
-    max_ts = cascades[0][1] + int((cascades[-1][1]-cascades[0][1]+Ntimestage-1)/Ntimestage) * (args.stage+1)
-    pos_users, neg_users = gen_pos_neg_users2(g=g, cascades=[elem for elem in cascades if elem[1]<=max_ts], sample_ratio=args.sample_ratio)
+    max_ts = cascades[0][1] + int((cascades[-1][1]-cascades[0][1]+Ntimestage-1)/Ntimestage) * (args['stage']+1)
+    pos_users, neg_users = gen_pos_neg_users2(g=g, cascades=[elem for elem in cascades if elem[1]<=max_ts], sample_ratio=args['sample_ratio'])
+
+    # Direct Return for Unbalanced One-Class Label
+    if len(pos_users) == 0 or len(neg_users) == 0:
+        return None
 
     # 2. 划分训练测试验证集
     num_user = g.vcount()
     labels = torch.zeros(num_user)
     float_mask = np.zeros(num_user)
 
-    labels[list(pos_users)] =  1
-    labels[list(neg_users)] = -1
+    labels[list(pos_users)] = 1
+    labels[list(neg_users)] =-1
     for label in [-1,1]:
         ids = np.where(labels == label)[0]
-        float_mask[ids] = np.random.permutation(np.linspace(1e-10,1,len(ids))) if args.shuffle else np.linspace(1e-10,1,len(ids))
+        float_mask[ids] = np.random.permutation(np.linspace(1e-10,1,len(ids))) if args['shuffle'] else np.linspace(1e-10,1,len(ids))
+    labels[labels==-1] = 0
+    labels = labels.long()
     
-    train_ids = np.where((float_mask>0) & (float_mask<=args.train_ratio/100))[0]
-    val_ids   = np.where((float_mask>args.train_ratio/100) & (float_mask<=(args.train_ratio+args.valid_ratio)/100))[0]
-    test_ids  = np.where(float_mask>(args.train_ratio+args.valid_ratio)/100)[0]
+    train_ids = np.where((float_mask>0) & (float_mask<=args['train_ratio']/100))[0]
+    val_ids   = np.where((float_mask>args['train_ratio']/100) & (float_mask<=(args['train_ratio']+args['valid_ratio'])/100))[0]
+    test_ids  = np.where(float_mask>(args['train_ratio']+args['valid_ratio'])/100)[0]
     # logger.info(f"train/valid/test={len(train_ids)}/{len(val_ids)}/{len(test_ids)}")
 
-    train_mask = get_binary_mask(num_user, train_ids)
-    val_mask   = get_binary_mask(num_user, val_ids)
-    test_mask  = get_binary_mask(num_user, test_ids)
+    train_mask = get_binary_mask(num_user, train_ids); val_mask = get_binary_mask(num_user, val_ids); test_mask = get_binary_mask(num_user, test_ids)
     if hasattr(torch, 'BoolTensor'):
-        train_mask = train_mask.bool()
-        val_mask = val_mask.bool()
-        test_mask = test_mask.bool()
+        train_mask = train_mask.bool(); val_mask = val_mask.bool(); test_mask = test_mask.bool()
     
     # 3. 计算NLL Loss中所需的class_weight
-    pos_neg_labels = list(filter(lambda x: x==1 or x==-1, labels))
-    nb_classes = np.unique(pos_neg_labels).shape[0]
-    class_weight = torch.FloatTensor(len(pos_neg_labels) / (nb_classes*np.unique(pos_neg_labels, return_counts=True)[1])) if args.class_weight_balanced else torch.ones(nb_classes)
-    labels[labels==-1] = 0 # 置负样本标签为0而非-1
+    nb_classes = 2
+    class_weight = torch.FloatTensor((len(pos_users)+len(neg_users))/(nb_classes*np.array([len(neg_users),len(pos_users)]))) if args['class_weight_balanced'] else torch.ones(nb_classes)
     
-    return labels.long(), train_mask, val_mask, test_mask, nb_classes, class_weight
+    return labels, train_mask, val_mask, test_mask, class_weight
 
 parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--model', type=str, default='hetersparsegat', help="available options are ['densegat','hetersparsegat','hypergat','hypergatwithhetersparsegat']")
+parser.add_argument('--model', type=str, default='densegat', help="available options are ['densegat','hetersparsegat','hypergat','hypergatwithhetersparsegat']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
 # >> Preprocess
 parser.add_argument('--sample-ratio', type=int, default=1, help="Sampling Ratio (1~inf)")
 parser.add_argument('--tweet-per-user', type=int, default=10, help="Tweets Per User (20, 40, 100)")
+parser.add_argument('--min-user-participate', type=int, default=100, help="Min User Participate in One Cascade")
 # parser.add_argument('--selected-tags', type=str, default="all", help="Agg On Some Part of Hastags")
 parser.add_argument('--cluster-method', type=str, default="agg", help="Cluster Method, options are ['mbk', 'agg']")
 parser.add_argument('--agg-dist-thr', type=float, default=5.0, help="Distance Threshold used in Hierarchical Clustering Method")
-parser.add_argument('--embedding-method', type=str, default="bertopic", help="Embedding Method For Tweet Nodes")
+parser.add_argument('--embedding-method', type=str, default="llm", help="Embedding Method For Tweet Nodes")
 # >> Model
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--sparse-data', action='store_true', default=True, help="Use Sparse Data and Model (Only Valid When model='hypergat')")
 parser.add_argument('--wo-user-centralized-net', action='store_true', default=False, help="Ablation Study w/o user-centralized-network")
 parser.add_argument('--wo-tweet-centralized-net', action='store_true', default=False, help="Ablation Study w/o tweet-centralized-network")
 # >> Hyper-Param
-parser.add_argument('--epochs', type=int, default=500, help='Number of epochs to train.')
+parser.add_argument('--epochs', type=int, default=300, help='Number of epochs to train.')
 # [default] hetersparsegat: 3e-3, hypergat: 3e-3, densegat: 3e-2
-parser.add_argument('--lr', type=float, default=3e-3, help='Initial learning rate.')
+parser.add_argument('--lr', type=float, default=3e-2, help='Initial learning rate.')
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
 parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropout rate (1 - keep probability).')
@@ -122,28 +113,33 @@ torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
-# Stage: Data Preparation
+# $1 Stage: Data Preparation
+# 1. Graph and Timeline
 if not args.sota_test:
     g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_subgraph.p")) # Total 44896 User Nodes
-    timelines = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_cascades/timeline_aggby_url_len5970_minuser5_subg.pkl"))
-    # timelines = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_cascades/deg_le483_timeline_aggby_url_tag.pkl"))
+    timelines = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_cascades/deg_le483_timeline_aggby_tag.pkl"))
 else:
     # Sota-Test uses a down-sampled version of normal dataset, and corresponding down-sample-ratio is clarified in its filename
     g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subg_dp_20_100_ratio_35_20_2.p"))
     timelines = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/subdf_dp_20_100_ratio_35_20_2.p"))
 user_nodes = g.vs["label"]
 
+# 2. User-Side Feats
 structural_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/vertex_feature_subgle483.npy"))
-struc_cascade_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
+three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
 deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), max_idx=user_nodes[-1]+1)
 
-fn = lambda val,ind: val if len(val)==len(ind) else val[ind]
-structural_feat = fn(structural_feat, ind=user_nodes)
-structural_feat = preprocessing.scale(structural_feat)
-struc_cascade_feat = fn(struc_cascade_feat, ind=user_nodes)
-struc_cascade_feat = preprocessing.scale(struc_cascade_feat)
-deepwalk_feat = fn(deepwalk_feat, ind=user_nodes)
-static_user_feat = np.concatenate((structural_feat,struc_cascade_feat),axis=1)
+# 3. User-Tweet-Mp, Tweet-Side Feats
+if args.embedding_method == 'lda':
+    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
+elif args.embedding_method == 'bertopic':
+    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp_filter_lt2words_processedforbert_subg.pkl"))
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_distribution_remove_hyphen_reduce_auto.pkl"))
+elif args.embedding_method == 'llm':
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/tweet-embedding/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim{args.unified_dim}.pkl"))
+if not isinstance(tweet_features, np.ndarray):
+    tweet_features = np.array(tweet_features)
 
 # TODO: consider args.stage when choosing tweet neighbors
 # if isinstance(args.stage, int) and 0<=args.stage<=7:
@@ -152,59 +148,74 @@ static_user_feat = np.concatenate((structural_feat,struc_cascade_feat),axis=1)
 # else:
 #     user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
 
-if args.embedding_method == 'lda':
-    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
-    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
-elif args.embedding_method == 'bertopic':
-    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/ut_mp_filter_lt2words_processedforbert_subg.pkl"))
-    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_distribution_remove_hyphen_reduce_auto.pkl"))
-if not isinstance(tweet_features, np.ndarray):
-    tweet_features = np.array(tweet_features)
-
-logger.info(f"user-feats dim={static_user_feat.shape[1]+deepwalk_feat.shape[1]}, tweet-feats dim={tweet_features.shape[1]}")
-
-# tensorboard-logger Preparation
+# $2 Stage: Preparation
+# 1. tensorboard-logger Preparation
 tensorboard_log_dir = 'tensorboard/tensorboard_%s_stage%d_epochs%d_lr%f_t%d' % (args.tensorboard_log, args.stage, args.epochs, args.lr, args.tweet_per_user)
 os.makedirs(tensorboard_log_dir, exist_ok=True)
 shutil.rmtree(tensorboard_log_dir)
 writer = SummaryWriter(tensorboard_log_dir)
 logger.info('tensorboard logging to %s', tensorboard_log_dir)
 
-# Stage: Data Processing
+# 2. Preprocess Timeline
 timelines = unique_cascades(timelines) # remove duplicate appearances for single user in some particular hashtag
-timelines = preprocess_timelines_byusernum(timelines, min_user_participate=20, max_user_participate=0)
-logger.info(f"timeline number={len(timelines)}")
+timelines = preprocess_timelines_byusernum(timelines, min_user_participate=args.min_user_participate, max_user_participate=0)
+logger.info(f"timeline number={len(timelines)}, total caselem={sum([len(elem) for elem in timelines.values()])}")
 
-# labels_mp, train_mask_mp, val_mask_mp, test_mask_mp, class_weight_mp = {}, {}, {}, {}, {}
-# for hashtag, cascades in timelines.items():
-#     labels, train_mask, val_mask, test_mask, nb_classes, class_weight = load_labels(args=args, g=g, cascades=cascades)
-#     labels_mp[hashtag] = labels; train_mask_mp[hashtag] = train_mask; val_mask_mp[hashtag] = val_mask; test_mask_mp[hashtag] = test_mask; class_weight_mp[hashtag] = class_weight
-#     logger.info(f"hashtag={hashtag}, mask_len={train_mask.sum().item()}/{val_mask.sum().item()}/{test_mask.sum().item()}, nb_classes={nb_classes}, class_weight={class_weight[0]:.2f}:{class_weight[1]:.2f}")
+# 3. Preprocess User-Side & Tweet-Side Feats
+fn = lambda val,ind: val if len(val)==len(ind) else val[ind]
+def preprocess_static_feat(static_feat:np.ndarray)->np.ndarray:
+    static_feat = fn(static_feat, ind=user_nodes)
+    static_feat = preprocessing.scale(static_feat)
+    return static_feat
 
-suffix = "_minuser10_onlyurl"
-labels_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/timeline_label_mp{suffix}.pkl"))
-train_mask_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/timeline_train_mask_mp{suffix}.pkl"))
-val_mask_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/timeline_val_mask_mp{suffix}.pkl"))
-test_mask_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/timeline_test_mask_mp{suffix}.pkl"))
-class_weight_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/timeline_class_weight_mp{suffix}.pkl"))
+structural_feat = preprocess_static_feat(structural_feat)
+three_sort_feat = preprocess_static_feat(three_sort_feat)
+deepwalk_feat = fn(deepwalk_feat, ind=user_nodes)
+# tweet_features = reduce_dimension(tweet_features, args.unified_dim)
 
-# Stage: Model Preparation
+# 4. Build tag2label_mask_cw_mp
+tag2label_mask_cw_mp_filepath = os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_tag2label_mask_cw_mp/deg_le483_tag2label_mask_cw_mp.pkl")
+if os.path.exists(tag2label_mask_cw_mp_filepath):
+    obj = load_pickle(tag2label_mask_cw_mp_filepath)
+    labels_mp = obj['label']; train_mask_mp = obj['train_mask']; val_mask_mp = obj['val_mask']; test_mask_mp = obj['test_mask']; class_weight_mp = obj['class_weight']
+else:
+    labels_mp, train_mask_mp, val_mask_mp, test_mask_mp, class_weight_mp = {}, {}, {}, {}, {}
+    for hashtag, cascades in timelines.items():
+        ret = load_labels(g=g, cascades=cascades, args=vars(args))
+        if ret is None:
+            logger.info(f"hashtag={hashtag}, one class not existing...")
+            continue
+        labels, train_mask, val_mask, test_mask, class_weight = ret
+        labels_mp[hashtag] = labels; train_mask_mp[hashtag] = train_mask; val_mask_mp[hashtag] = val_mask; test_mask_mp[hashtag] = test_mask; class_weight_mp[hashtag] = class_weight
+        logger.info(f"hashtag={hashtag}, mask_len={train_mask.sum().item()}/{val_mask.sum().item()}/{test_mask.sum().item()}, class_weight={class_weight[0]:.2f}:{class_weight[1]:.2f}")
+
+    save_pickle({
+        "label": labels_mp, "train_mask": train_mask_mp, "val_mask": val_mask_mp, "test_mask": test_mask_mp, "class_weight": class_weight_mp,
+    }, tag2label_mask_cw_mp_filepath)
+
+# $3 Stage: Model Preparation
 n_user = g.vcount()
 n_units = [int(x) for x in args.hidden_units.strip().split(",")]
 n_heads = [int(x) for x in args.heads.strip().split(",")]
 nb_classes = 2
 
-if args.model == 'densegat':
+if args.model == 'densegat' or args.model == 'densegatwithllm':
     edges = g.get_edgelist() + [(i,i) for i in range(len(user_nodes))]
     adj = create_sparsemat_from_edgelist(edges, m=len(user_nodes), n=len(user_nodes))
     adj = get_sparse_tensor(adj.tocoo())
 
+    static_user_feat = np.concatenate((structural_feat,three_sort_feat),axis=1)
     static_emb = torch.FloatTensor(static_user_feat)
-    dynamic_embs = [torch.FloatTensor(deepwalk_feat)]
+    if args.model == 'densegat':
+        dynamic_embs = [torch.FloatTensor(deepwalk_feat)]
+    else:
+        dynamic_embs = [torch.FloatTensor(deepwalk_feat), torch.FloatTensor(tweet_features)]
+    
     static_nfeat = static_emb.shape[1]
     dynamic_nfeats = [emb.shape[1] for emb in dynamic_embs]
     n_units = [int(x) for x in args.hidden_units.strip().split(",")] + [nb_classes]
     n_heads = n_heads + [1]
+
     model = DenseGAT(static_nfeat=static_nfeat, dynamic_nfeats=dynamic_nfeats, n_units=n_units, n_heads=n_heads, shape_ret=(n_user,nb_classes),
         attn_dropout=args.attn_dropout, dropout=args.dropout, instance_normalization=args.instance_normalization,)
     logger.info(f"adj={adj.shape}, static_nfeats={static_nfeat}, dynamic_nfeats={dynamic_nfeats}, n_units={n_units}, n_heads={n_heads}, shape_ret={(n_user,nb_classes)}")
@@ -213,7 +224,7 @@ if args.model == 'densegat':
         adj = adj.to(args.gpu)
         static_emb = static_emb.to(args.gpu)
         dynamic_embs = [emb.to(args.gpu) for emb in dynamic_embs]
-        model.to(args.gpu)
+        model = model.to(args.gpu)
 
 elif args.model == 'hetersparsegat':
     tweet_nodes, _, ut_edges = sample_tweets_around_user(users=set(user_nodes), ut_mp=user_tweet_mp, tweets_per_user=args.tweet_per_user, return_edges=True)
@@ -224,7 +235,7 @@ elif args.model == 'hetersparsegat':
         create_sparsemat_from_edgelist(edgelist=edges[1], m=len(nodes), n=len(nodes)),]
     hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
     
-    static_user_features = np.concatenate((structural_feat,struc_cascade_feat),axis=1)
+    static_user_features = np.concatenate((structural_feat,three_sort_feat),axis=1)
     fn = lambda val,ind: val if len(val)==len(ind) else val[ind]
     tweet_features = fn(tweet_features, tweet_nodes)
     feats = extend_featspace2([static_user_features, tweet_features])
@@ -256,7 +267,7 @@ elif args.model == 'hypergat':
     hadjs = [get_sparse_tensor(hadj.tocoo()) if args.sparse_data else torch.BoolTensor(hadj) for hadj in hadjs]
 
     fn = lambda val, ind: val if len(val)==len(ind) else val[ind]
-    user_features = np.concatenate((structural_feat,struc_cascade_feat,deepwalk_feat),axis=1)
+    user_features = np.concatenate((structural_feat,three_sort_feat,deepwalk_feat),axis=1)
     user_features = fn(user_features, user_nodes)
     hembs = [torch.FloatTensor(user_features), torch.FloatTensor(tw_feats),]
     model = HyperGAT(n_feats=[user_features.shape[1], tw_feats.shape[1]], n_units=n_units, n_heads=n_heads, shape_ret=(n_user,nb_classes),
@@ -281,7 +292,7 @@ elif args.model == 'hypergatwithhetersparsegat':
     hadjs = [get_sparse_tensor(hadj.tocoo()) for hadj in hadjs]
     
     fn = lambda val, ind: val if len(val)==len(ind) else val[ind]
-    user_features = np.concatenate((structural_feat,struc_cascade_feat,deepwalk_feat),axis=1)
+    user_features = np.concatenate((structural_feat,three_sort_feat,deepwalk_feat),axis=1)
     user_features  = fn(user_features, user_nodes)
     tweet_features = tw_feats[n_user:] # (Nu+Nct,fct) -> (Nct,fct)
     feats = extend_featspace([user_features, tweet_features]) # (Nu,fu), (Nct,fct) -> (Nu+Nct,fu+fct) 
@@ -296,7 +307,6 @@ elif args.model == 'hypergatwithhetersparsegat':
         model.to(args.gpu)
 
 optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-# stopper = EarlyStopping(patience=args.patience)
 
 def save_model(epoch, args, model, optimizer):
     state = {
@@ -339,11 +349,12 @@ def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
     loss, correct, total, prec, rec, f1 = 0., 0., 0., 0., 0., 0.
     y_true, y_pred, y_score, thrs = [], [], [], {}
     for hashtag in sorted(timelines.keys()):
+        if hashtag not in labels_mp: continue
         labels, val_mask, test_mask, class_weight = labels_mp[hashtag], val_mask_mp[hashtag], test_mask_mp[hashtag], class_weight_mp[hashtag]
         if args.cuda:
-            labels, class_weight = labels.to(args.gpu), class_weight.to(args.gpu)
+            labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
         
-        if args.model == 'densegat':
+        if args.model == 'densegat' or args.model == 'densegatwithllm':
             output = model(adj, static_emb, dynamic_embs)
         elif args.model == 'hetersparsegat':
             output = model(hadjs, static_hembs, dynamic_hembs)
@@ -398,12 +409,13 @@ def train(epoch, log_desc='train_'):
     model.train()
     loss, total = 0., 0.
     for hashtag in sorted(timelines.keys()):
+        if hashtag not in labels_mp: continue
         labels, train_mask, class_weight = labels_mp[hashtag], train_mask_mp[hashtag], class_weight_mp[hashtag]
         if args.cuda:
-            labels, class_weight = labels.to(args.gpu), class_weight.to(args.gpu)
+            labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
         
         optimizer.zero_grad()
-        if args.model == 'densegat':
+        if args.model == 'densegat' or args.model == 'densegatwithllm':
             output = model(adj, static_emb, dynamic_embs)
         elif args.model == 'hetersparsegat':
             output = model(hadjs, static_hembs, dynamic_hembs)

@@ -14,6 +14,7 @@ import configparser
 from scipy import sparse
 from typing import Any, Dict, List
 from itertools import combinations, chain
+from sklearn.decomposition import PCA
 # from numba import njit
 # from numba import types
 # from numba.typed import Dict, List
@@ -72,6 +73,14 @@ def flattern(ll:List[list]):
 
 def normalize(feat:np.ndarray):
     return feat/(np.linalg.norm(feat,axis=1)+1e-10).reshape(-1,1)
+
+def reduce_dimension(feats:np.ndarray, reduce_dim:int):
+    feats = feats.transpose((1,0))
+    pca = PCA(n_components=reduce_dim)
+    pca.fit(feats)
+    reduced_feats = pca.components_
+    reduced_feats = reduced_feats.transpose((1,0))
+    return reduced_feats
 
 def load_w2v_feature(file, max_idx=0):
     with open(file, "rb") as f:

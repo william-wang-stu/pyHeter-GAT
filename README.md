@@ -40,6 +40,7 @@ pipenv install
 # https://pytorch.org/get-started/previous-versions/
 # 切换到pyHeter-GAT环境里执行安装pytorch
 pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --extra-index-url https://download.pytorch.org/whl/cu113
+# conda install pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cudatoolkit=11.3 -c pytorch
 pip install -e .
 
 # pipenv环境安装出现了不可复现的问题, 猜测和网络相关, 盯着它重试即可:D

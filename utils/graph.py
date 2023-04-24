@@ -8,8 +8,9 @@ import torch
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Union
 from itertools import combinations
+from tqdm import tqdm
 
 def init_graph(nb_nodes:int, edgelist:List[Any], is_directed:bool=False, outputfile_dirpath:str="", save_graph:bool=False):
     graph = igraph.Graph(nb_nodes, directed=is_directed)
@@ -344,6 +345,60 @@ def find_tweet_by_cascade_info(user_texts_mp:Dict[int,dict], user_id:int, timest
         if text['timestamp'] == timestamp:
             return text['text']
     return None
+
+def aggregate_texts_by_timeline(cascades:Dict[int,list], user_texts_mp:Dict[int,dict], g:igraph.Graph)->Dict[int,list]:
+    # Find Tweet, and Build (tid) -> (text), (tid) -> (uid, timestamp)
+    tid = 0
+    tid2text_mp = {}
+    tid2caselem_mp = {}
+    tids_aggby_timeline_mp = {}
+
+    for tag, cascades in tqdm(cascades.items()):
+        tids = []
+        for uid, timestamp in cascades:
+            text = find_tweet_by_cascade_info(user_texts_mp, user_id=g.vs["label"][uid], timestamp=timestamp)
+            if text is None:
+                continue
+            tid2text_mp[tid] = text
+            tid2caselem_mp[tid] = {"uid":uid, "ts":timestamp}
+            tids.append(tid)
+            tid += 1
+        tids_aggby_timeline_mp[tag] = tids
+
+    # save_pickle(tids_aggby_timeline_mp, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/tids_aggby_timeline_mp.pkl")
+    # save_pickle(tid2text_mp, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/tid2text_mp.pkl")
+    # save_pickle(tid2caselem_mp, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/tid2caselem_mp.pkl")
+    logger.info("Completed...")
+
+    return tids_aggby_timeline_mp
+
+def build_tweet_mat_for_cascades(tweet_mat_shape:Tuple[int,int], cascades:Dict[str,list], tweet_features:np.ndarray)->Dict[str,np.ndarray]:
+    tag2tweet_mat_mp = {}
+    tid = 0
+    for tag, cascade in cascades.items():
+        # Build One-to-One Relationship, UID <-> TID
+        # Keep the First User Appearance when coming to Multiple Appearances in One Cascade
+        uids, tids, uset = [], [], set()
+        for idx, (uid, _) in enumerate(cascade):
+            if uid in uset: continue
+            uids.append(uid); tids.append(tid+idx); uset.add(uid)
+        tid += len(cascade)
+
+        # Build Tweet Mat
+        tweet_mat = np.zeros(shape=tweet_mat_shape)
+        tweet_mat[uids, :] = tweet_features[tids, :]
+        tag2tweet_mat_mp[tag] = tweet_mat
+    return tag2tweet_mat_mp
+
+def mask_mat(mat:Union[torch.Tensor,np.ndarray], mask:torch.Tensor)->torch.Tensor:
+    if type(mat) == np.ndarray:
+        mat = torch.tensor(mat)
+    if len(mat.shape) > len(mask.shape) or mat.shape[1] > mask.shape[1]:
+        for _ in range(mask.dim(), mat.dim()):
+            mask = mask.unsqueeze(-1)
+        mask = mask.expand_as(mat)
+    masked_mat = mat.data.masked_fill(~mask.bool(), 0.0)
+    return masked_mat.float()
 
 def build_topic_similarity_user_edges(ut_mp:dict):
     # 1. Get Doc-Topic

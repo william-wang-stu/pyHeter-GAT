@@ -11,6 +11,17 @@ import torch.nn.init as init
 # from dgl.nn.pytorch import GATConv, GATv2Conv
 from typing import List, Union
 
+class FullyConnectedLayer(nn.Module):
+    def __init__(self, nb_input, nb_hidden, nb_output) -> None:
+        super().__init__()
+
+        self.fc1 = nn.Linear(nb_input, nb_hidden, bias=True)
+        self.fc2 = nn.Linear(nb_hidden, nb_output, bias=True)
+        self.relu = nn.ReLU()
+    
+    def forward(self, x):
+        return self.fc2(self.relu(self.fc1(x)))
+
 class MultiHeadGraphAttention(nn.Module):
     def __init__(self, n_head, f_in, f_out, attn_dropout, bias=True):
         super(MultiHeadGraphAttention, self).__init__()
@@ -144,7 +155,7 @@ class DenseGAT(nn.Module):
                 norm = nn.InstanceNorm1d(dynamic_nfeat, momentum=0.0, affine=True)
                 setattr(self, f"norm-{i}", norm)
 
-        n_feat = static_nfeat+ sum(dynamic_nfeats)
+        n_feat = static_nfeat + sum(dynamic_nfeats)
         self.layer_stack = self._build_layer_stack(extend_units=[n_feat]+n_units, n_heads=n_heads, attn_dropout=attn_dropout)
         # self.fc_layer = nn.Linear(in_features=n_units[-1], out_features=shape_ret[1])
     
