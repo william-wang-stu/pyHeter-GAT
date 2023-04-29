@@ -67,18 +67,19 @@ logger.info(suffix)
 # logger.info("Completed...")
 
 # Reduce Dimension, since xlm-roberta-base output is too largeeee!
-user2emb = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm/tag_embs_aggbyuser{suffix}.pkl")
+# user2emb = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm/tag_embs_aggbyuser{suffix}.pkl")
+tag2emb = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm/tag_embs_model_xlm-roberta-base.pkl")
 logger.info("Data Loading...")
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dim', type=int, default=128, help="")
 args = parser.parse_args()
 
-user2emb = user2emb.transpose((1,0))
+user2emb = tag2emb.transpose((1,0))
 pca = PCA(n_components=args.dim)
 pca.fit(user2emb)
 tweet_features = pca.components_
 tweet_features = tweet_features.transpose((1,0))
 
-save_pickle(tweet_features, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm/tag_embs_aggbyuser{suffix}_pca_dim{args.dim}.pkl")
+save_pickle(tweet_features, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm/tag_embs{suffix}_pca_dim{args.dim}.pkl")
 logger.info("Completed...")

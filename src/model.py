@@ -135,7 +135,7 @@ class SpGATLayer(nn.Module):
         else:
             return out
 
-class DenseGAT(nn.Module):
+class DenseSparseGAT(nn.Module):
     def __init__(
         self, static_nfeat, dynamic_nfeats, n_units, n_heads, shape_ret,
         attn_dropout, dropout, instance_normalization=False,
@@ -180,7 +180,7 @@ class DenseGAT(nn.Module):
         emb = torch.cat(norm_embs, dim=1)
         emb = torch.cat((emb,static_emb),dim=1)
 
-        n = adj.shape[1]
+        n = adj.shape[0]
         for i, gat_layer in enumerate(self.layer_stack):
             emb = gat_layer(emb, adj) # n_head*n*f_out
             if i+1 == len(self.layer_stack):
@@ -221,18 +221,18 @@ class AdditiveAttention(nn.Module):
         )
         return type_fusion_emb
 
-class HeterSparseGAT(nn.Module):
+class HeterEdgeSparseGAT(nn.Module):
     """
     思路: 多邻接矩阵+稀疏注意力头
-    特点: 先把不同类型节点映射到统一特征空间维度中
+    特点: 异质边, 节点类型只有用户这一类
     """
     def __init__(
-        self, n_feats, dynamic_nfeats, n_unified, n_units, n_heads, shape_ret,
-        attn_dropout, dropout, instance_normalization=False, sparse=True, skip_fc=False,
+        self, static_nfeat, dynamic_nfeats, n_adj, n_units, n_heads, shape_ret,
+        attn_dropout, dropout, instance_normalization=False, sparse=True,
     ) -> None:
         """
         Arguments:
-            n_feats: [f1,f2,...,fn], contains initial dimensions of all node types
+            n_adj:   implied how much heterogeneous adj matrices there are
             n_units: contains hidden unit dimension of each layer
             n_heads: contains attention head number of each layer
             shape_ret: (n_user,nb_classes=2), contains shape of required return tensor
@@ -242,20 +242,19 @@ class HeterSparseGAT(nn.Module):
         self.shape_ret = shape_ret
         self.dropout = dropout
         self.inst_norm = instance_normalization
-        self.skip_fc = skip_fc
         d1 = n_units[-1]
-        for i, (n_feat, dynamic_nfeat) in enumerate(zip(n_feats, dynamic_nfeats)):
-            weight_mat = nn.Parameter(torch.Tensor(n_feat, n_unified))
-            nn.init.xavier_uniform_(weight_mat) # set initial values
-            setattr(self, f"weight-mat-{i}", weight_mat)
-            if self.inst_norm:
-                setattr(self, f"norm-{i}", nn.InstanceNorm1d(dynamic_nfeat, momentum=0.0, affine=True))
-        
+
+        if self.inst_norm:
+            for i, dynamic_nfeat in enumerate(dynamic_nfeats):
+                norm = nn.InstanceNorm1d(dynamic_nfeat, momentum=0.0, affine=True)
+                setattr(self, f"norm-{i}", norm)
+
+        n_feat = static_nfeat + sum(dynamic_nfeats)
         self.layer_stack = nn.ModuleList([
-                self._build_layer_stack(extend_units=[n_unified]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, sparse=sparse)
-            for _ in n_feats])
-        self.additive_attention = AdditiveAttention(d=n_unified, d1=d1, d2=n_units[-1])
-        self.fc_layer = nn.Linear(in_features=d1*(len(n_feats)+1), out_features=shape_ret[1])
+                self._build_layer_stack(extend_units=[n_feat]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, sparse=sparse)
+            for _ in range(n_adj)])
+        self.additive_attention = AdditiveAttention(d=n_feat, d1=d1, d2=n_units[-1])
+        self.fc_layer = nn.Linear(in_features=d1*(n_adj+1), out_features=shape_ret[1])
 
     def _build_layer_stack(self, extend_units, n_heads, attn_dropout, sparse):
         layer_stack = nn.ModuleList()
@@ -265,33 +264,22 @@ class HeterSparseGAT(nn.Module):
                 SpGATLayer(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout) if sparse else
                     MultiHeadGraphAttention(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout),
             )
-            # f_in = extend_units[idx] * n_heads[idx-1] if idx else extend_units[idx]
-            # layer_stack.append(
-            #     SpGATLayer(n_head=n_heads[idx], f_in=f_in, f_out=extend_units[idx+1], attn_dropout=attn_dropout) if sparse else
-            #         MultiHeadGraphAttention(n_head=n_heads[idx], f_in=f_in, f_out=extend_units[idx+1], attn_dropout=attn_dropout),
-            # )
         return layer_stack
     
-    def forward(self, hadjs:torch.Tensor, static_hembs:Union[List[torch.Tensor],None], dynamic_hembs:List[torch.Tensor]): # hadj:(|Rs|,n,n), hembs:(|Rs|,n,f_in), f_in1!=f_in2
-        trans_embs:List[torch.Tensor] = []
-        for i, (static_hemb, dynamic_hemb) in enumerate(zip(static_hembs, dynamic_hembs)):
-            trans_emb = dynamic_hemb
+    def forward(self, hadjs:List[torch.Tensor], static_emb:torch.Tensor, dynamic_embs:List[torch.Tensor]): # hadjs:(|Rs|,n,n), embs:(|Rs|,n,f_in)
+        norm_embs = []
+        for i, dynamic_emb in enumerate(dynamic_embs):
+            norm_emb = dynamic_emb
             if self.inst_norm:
                 norm = getattr(self, f"norm-{i}")
-                trans_emb = norm(trans_emb.transpose(0,1)).transpose(0,1)
-            # logger.info(f"norm={trans_emb.shape}")
-            if static_hemb is not None:
-                # logger.info(static_hemb.shape)
-                trans_emb = torch.cat((trans_emb, static_hemb), dim=-1)
-                # logger.info(f"static={trans_emb.shape}")
-            weight_mat = getattr(self, f"weight-mat-{i}")
-            trans_emb = torch.matmul(trans_emb, weight_mat) # (n,f_in) -> (n,f_in_unified)
-            # logger.info(f"tot={trans_emb.shape}")
-            trans_embs.append(trans_emb)
+                norm_emb = norm(norm_emb.transpose(0,1)).transpose(0,1)
+            norm_embs.append(norm_emb)
+        emb = torch.cat(norm_embs, dim=1)
+        emb = torch.cat((emb,static_emb),dim=1)
 
         heter_embs = []
         for heter_idx, layer_stack in enumerate(self.layer_stack):
-            x, hadj = trans_embs[heter_idx], hadjs[heter_idx] # x: (n,f_in_unified)
+            x, hadj = emb, hadjs[heter_idx] # x: (n,f_in_unified)
             n = x.shape[0]
             for i, gat_layer in enumerate(layer_stack):
                 x = gat_layer(x, hadj) # (n,n_head,f_out)
@@ -302,149 +290,8 @@ class HeterSparseGAT(nn.Module):
                     x = F.dropout(x, self.dropout, training=self.training)
             heter_embs.append(x[:self.shape_ret[0]].unsqueeze(-2)) # (Nu, 1, f_out)
         type_aware_emb = torch.cat(heter_embs, dim=-2) # (Nu, |Rs|, D')
-        type_fusion_emb = self.additive_attention(trans_emb[0], type_aware_emb) # (Nu, 1, D')
-        ret = torch.cat((type_aware_emb, type_fusion_emb),dim=1).reshape(self.shape_ret[0],-1) # (Nu, |Rs|+1, D') -> (Nu, (|Rs|+1)*D')
-        if self.skip_fc:
-            return ret
-        ret = self.fc_layer(ret) #  (Nu, nb_classes)
-        return F.log_softmax(ret, dim=-1)
-
-class HyperGAT(nn.Module):
-    """
-    思路: 用户侧特征+用户侧邻接矩阵做GAT卷积, 推文侧特征+推文侧邻接矩阵做GAT卷积, 最后合并concat两侧表征
-    """
-    def __init__(
-        self, n_feats, n_units, n_heads, shape_ret,
-        attn_dropout, dropout, instance_normalization=False, sparse=True,
-        wo_user_centralized_net=False, wo_tweet_centralized_net=False,
-    ) -> None:
-        super().__init__()
-
-        self.shape_ret = shape_ret
-        self.dropout = dropout
-        self.inst_norm = instance_normalization
-        if self.inst_norm:
-            for i, n_feat in enumerate(n_feats):
-                setattr(self, f"norm-{i}", nn.InstanceNorm1d(n_feat, momentum=0.0, affine=True))
-
-        # NOTE: User-Centralized & Tweet-Centralized GAT-Network
-        self.layer_stack = nn.ModuleList()
-        self.layer_mask = [1-int(wo_user_centralized_net), 1-int(wo_tweet_centralized_net)]
-        for i, mask in enumerate(self.layer_mask):
-            if mask == 1: self.layer_stack.append(
-                    self._build_layer_stack(extend_units=[n_feats[i]]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, sparse=sparse)
-                )
-        self.fc_layer = nn.Linear(in_features=n_units[-1]*(2-int(wo_user_centralized_net)-int(wo_tweet_centralized_net)), out_features=shape_ret[1])
-    
-    def _build_layer_stack(self, extend_units, n_heads, attn_dropout, sparse):
-        layer_stack = nn.ModuleList()
-        for n_unit, n_head, f_out, fin_head in zip(extend_units[:-1], n_heads, extend_units[1:], [None]+n_heads[:-1]):
-            f_in = n_unit*fin_head if fin_head is not None else n_unit
-            layer_stack.append(
-                SpGATLayer(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout) if sparse else
-                    MultiHeadGraphAttention(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout),
-            )
-        return layer_stack
-    
-    def forward(self, hadjs:List[torch.Tensor], hembs:List[torch.Tensor]):
-        if self.inst_norm:
-            norm_embs:List[torch.Tensor] = []
-            for i, (emb,mask) in enumerate(zip(hembs,self.layer_mask)):
-                if mask == 0: continue
-                norm = getattr(self, f"norm-{i}")
-                norm_emb = norm(emb.transpose(0,1)).transpose(0,1)
-                norm_embs.append(norm_emb)
-            hembs = norm_embs
-
-        heter_embs = []
-        for stack_idx, layer_stack in enumerate(self.layer_stack):
-            emb, adj = hembs[stack_idx], hadjs[stack_idx]
-            n = emb.shape[0]
-            for layer_idx, gat_layer in enumerate(layer_stack):
-                emb = gat_layer(emb, adj) # (n, n_head, f_out)
-                if layer_idx+1 == len(layer_stack):
-                    emb = emb.mean(dim=1) # (n, n_head, f_out) -> (n, f_out)
-                else:
-                    emb = F.elu(emb.reshape(n, -1)) # (n, n_head, f_out) -> (n, n_head*f_out)
-                    emb = F.dropout(emb, self.dropout, training=self.training)
-            heter_embs.append(emb[:self.shape_ret[0]]) # (n, f_out) -> (n_user, f_out)
-        ret = torch.cat(heter_embs, dim=-1) # (n_user, f_out)*2 -> (n_user, f_out*2)
-        ret = self.fc_layer(ret) # (n_user, nb_classes)
-        return F.log_softmax(ret, dim=-1)
-
-class HyperGATWithHeterSparseGAT(nn.Module):
-    """
-    思路: 在HyperGAT的基础上, 用HeterSparseGAT替代Tweet-Centralized-Network
-    """
-    def __init__(
-        self, n_feats, n_unified, n_units, n_heads, shape_ret,
-        attn_dropout, dropout, instance_normalization=False, sparse=True,
-        wo_user_centralized_net=False,
-    ) -> None:
-        super().__init__()
-
-        self.shape_ret = shape_ret
-        self.dropout = dropout
-        self.inst_norm = instance_normalization
-        if self.inst_norm:
-            for i, n_feat in enumerate(n_feats):
-                setattr(self, f"norm-{i}", nn.InstanceNorm1d(n_feat, momentum=0.0, affine=True))
-
-        # NOTE: User-Centralized & Tweet-Centralized GAT-Network
-        self.layer_stack = nn.ModuleList()
-        self.layer_mask = [1-int(wo_user_centralized_net), 1]
-        for i, mask in enumerate(self.layer_mask):
-            if i == 0 and mask == 1: self.layer_stack.append(
-                    self._build_layer_stack(extend_units=[n_feats[i]]+n_units, n_heads=n_heads, attn_dropout=attn_dropout, sparse=sparse)
-                )
-            elif i == 1 and mask == 1: self.layer_stack.append(
-                    HeterSparseGAT(n_feats=n_feats, n_unified=n_unified, n_units=n_units, n_heads=n_heads, shape_ret=shape_ret,
-                        attn_dropout=attn_dropout, dropout=dropout, instance_normalization=instance_normalization, sparse=sparse, skip_fc=True)
-                )
-        self.fc_layer = nn.Linear(in_features=n_units[-1]*(1-int(wo_user_centralized_net)+len(n_feats)+1), out_features=shape_ret[1])
-    
-    def _build_layer_stack(self, extend_units, n_heads, attn_dropout, sparse):
-        layer_stack = nn.ModuleList()
-        for n_unit, n_head, f_out, fin_head in zip(extend_units[:-1], n_heads, extend_units[1:], [None]+n_heads[:-1]):
-            f_in = n_unit*fin_head if fin_head is not None else n_unit
-            layer_stack.append(
-                SpGATLayer(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout) if sparse else
-                    MultiHeadGraphAttention(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout),
-            )
-        return layer_stack
-    
-    def forward(self, hadjs:List[torch.Tensor], hembs:List[torch.Tensor]):
-        """
-        hadjs: [Nu*Nu, [(Nu+Nt)*(Nu+Nt),(Nu+Nt)*(Nu+Nt)]],
-        hembs: [Nu*fu, (Nu+Nt)*(fu+ft)],
-        """
-        if self.inst_norm:
-            norm_embs:List[torch.Tensor] = []
-            for i, (emb,mask) in enumerate(zip(hembs,self.layer_mask)):
-                if mask == 0: continue
-                norm = getattr(self, f"norm-{i}")
-                norm_emb = norm(emb.transpose(0,1)).transpose(0,1)
-                norm_embs.append(norm_emb)
-            hembs = norm_embs
-
-        heter_embs = []
-        for stack_idx, layer_stack in enumerate(self.layer_stack):
-            emb, adj = hembs[stack_idx], hadjs[stack_idx]
-            if stack_idx == 0 and self.layer_mask[stack_idx] == 1:
-                # User-Centralized Network (Using Multi-Stack GAT)
-                n = emb.shape[0]
-                for layer_idx, gat_layer in enumerate(layer_stack):
-                    emb = gat_layer(emb, adj) # (n, n_head, f_out)
-                    if layer_idx+1 == len(layer_stack):
-                        emb = emb.mean(dim=1) # (n, n_head, f_out) -> (n, f_out)
-                    else:
-                        emb = F.elu(emb.reshape(n, -1)) # (n, n_head, f_out) -> (n, n_head*f_out)
-                        emb = F.dropout(emb, self.dropout, training=self.training)
-                assert emb.shape[0] == self.shape_ret[0]
-                heter_embs.append(emb[:self.shape_ret[0]]) # (n, f_out) -> (n_user, f_out)
-            else:
-                # Tweet-Centralized Network (Using HeterSparseGAT)
-                heter_embs.append(layer_stack(adj, emb))
-        ret = torch.cat(heter_embs, dim=-1) # (n_user, f_out)*2 -> (n_user, f_out*2)
-        ret = self.fc_layer(ret) # (n_user, nb_classes)
+        type_fusion_emb = self.additive_attention(emb, type_aware_emb) # (Nu, 1, D')
+        ret = self.fc_layer(
+            torch.cat((type_aware_emb, type_fusion_emb),dim=1).reshape(self.shape_ret[0],-1) # (Nu, |Rs|+1, D') -> (Nu, (|Rs|+1)*D')
+        ) #  (Nu, nb_classes)
         return F.log_softmax(ret, dim=-1)

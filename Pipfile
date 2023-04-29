@@ -24,6 +24,8 @@ tensorflow = "*"
 bitermplus = "*"
 emoji = "*"
 protobuf = "==3.20.0"
+torch-sparse = "*"
+nvidia-ml-py3 = "*"
 
 [dev-packages]
 torch-tb-profiler = "*"

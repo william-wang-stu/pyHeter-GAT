@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import os
 import psutil
+import subprocess
 import random
 import configparser
 from scipy import sparse
@@ -50,6 +51,12 @@ def load_pickle(filename):
 
 def check_memusage_GB():
     return psutil.Process().memory_info().rss / (1024*1024*1024)
+
+def check_gpu_memory_usage(gpu_id:int):
+    command = "nvidia-smi --query-gpu=memory.used --format=csv"
+    memory_free_info = subprocess.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
+    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+    return memory_free_values[gpu_id]
 
 def summarize_distribution(data: List[Any]):
     logger.info(f"list length={len(data)}")

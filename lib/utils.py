@@ -230,15 +230,17 @@ def filter_columns(df: pd.DataFrame, col_name: List[str], remove_nan: bool=True)
 #             edge_mp.append((from_node, to_node))
 #     # logger.info(f"Total {len(edge_mp)} Edges, From_Node_Type={from_dtype}, To_Node_Type={to_dtype}")
 
-def get_sparse_tensor(mat: sparse.coo_matrix):
-    values = mat.data
+def get_sparse_tensor(mat:sparse.coo_matrix):
     indices = np.vstack((mat.row, mat.col))
-
+    values = mat.data
     i = torch.LongTensor(indices)
-    v = torch.FloatTensor(values)
-    shape = mat.shape
-
-    return torch.sparse.FloatTensor(i, v, torch.Size(shape))
+    if values.dtype == 'uint8':
+        v = torch.ByteTensor(values)
+        ret = torch.sparse.ByteTensor(i, v, torch.Size(mat.shape))
+    else:
+        v = torch.FloatTensor(values)
+        ret = torch.sparse.FloatTensor(i, v, torch.Size(mat.shape))
+    return ret
 
 def create_sparse(coo_list, m, n):
     data = np.ones((len(coo_list),))
