@@ -86,7 +86,7 @@ parser.add_argument('--n-component', type=int, default=3, help="Number of Promin
 parser.add_argument('--window-size', type=int, default=200, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--sparse-data', action='store_true', default=True, help="Use Sparse Data and Model (Only Valid When model='hypergat')")
-parser.add_argument('--use-tweet-feat', action='store_true', default=True, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
+parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
 parser.add_argument('--wo-user-centralized-net', action='store_true', default=False, help="Ablation Study w/o user-centralized-network")
 parser.add_argument('--wo-tweet-centralized-net', action='store_true', default=False, help="Ablation Study w/o tweet-centralized-network")
 # >> Hyper-Param
@@ -104,9 +104,11 @@ parser.add_argument('--stage', type=int, default=Ntimestage-1, help="Time Stage 
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
 parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
-parser.add_argument('--use-url-timeline', action='store_true', default=False, help="Use URL-only Timeline Dataset")
-parser.add_argument('--sota-test', action='store_true', default=False, help="Use Prepared Sota-Test-Dataset if set true")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
+# >> Ablation Study
+parser.add_argument('--use-subgraph-dataset', action='store_true', default=False, help="Use Prepared Subgraph Dataset for DenseGAT-form Models if set true")
+parser.add_argument('--use-url-timeline', action='store_true', default=False, help="Use URL-only Timeline Dataset if set true, otherwise Use Tag-only Timeline")
+parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 
 args = parser.parse_args()
 args.cuda = torch.cuda.is_available()
@@ -119,11 +121,11 @@ if args.cuda:
 
 # $1 Stage: Data Preparation
 # 1. Graph and Timeline
-if not args.sota_test:
+if not args.use_subgraph_dataset:
     g  = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deg_le483_subgraph.p")) # Total 44896 User Nodes
     if not args.use_url_timeline: # Use TAG-only Dataset
         timelines = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_cascades/deg_le483_timeline_aggby_tag.pkl"))
-    else:
+    else: # Else Use URL-only Dataset
         timelines = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_cascades/timeline_aggby_url_len5970_minuser5_subg.pkl"))
 else:
     # Sota-Test uses a down-sampled version of normal dataset, and corresponding down-sample-ratio is clarified in its filename
@@ -183,10 +185,8 @@ deepwalk_feat = fn(deepwalk_feat, ind=user_nodes)
 # tweet_features = reduce_dimension(tweet_features, args.unified_dim)
 
 # 4. Build tag2label_mask_cw_mp
-if not args.use_url_timeline:
-    tag2label_mask_cw_mp_filepath = os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_tag2label_mask_cw_mp/deg_le483_tag2label_mask_cw_mp.pkl")
-else:
-    tag2label_mask_cw_mp_filepath = os.path.join(DATA_ROOTPATH, "HeterGAT/basic/build_tag2label_mask_cw_mp/deg_le483_tag2label_mask_cw_mp_url5970.pkl")
+use_url_suffix = "_url5970" if args.use_url_timeline else ""
+tag2label_mask_cw_mp_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/build_tag2label_mask_cw_mp/deg_le483_tag2label_mask_cw_mp{use_url_suffix}.pkl")
 if os.path.exists(tag2label_mask_cw_mp_filepath):
     obj = load_pickle(tag2label_mask_cw_mp_filepath)
     labels_mp = obj['label']; train_mask_mp = obj['train_mask']; val_mask_mp = obj['val_mask']; test_mask_mp = obj['test_mask']; class_weight_mp = obj['class_weight']
@@ -204,13 +204,6 @@ else:
     save_pickle({
         "label": labels_mp, "train_mask": train_mask_mp, "val_mask": val_mask_mp, "test_mask": test_mask_mp, "class_weight": class_weight_mp,
     }, tag2label_mask_cw_mp_filepath)
-
-# suffix = "_minuser10_onlyurl"
-# labels_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/build_tag2label_mask_cw_mp/timeline_label_mp{suffix}.pkl"))
-# train_mask_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/build_tag2label_mask_cw_mp/timeline_train_mask_mp{suffix}.pkl"))
-# val_mask_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/build_tag2label_mask_cw_mp/timeline_val_mask_mp{suffix}.pkl"))
-# test_mask_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/build_tag2label_mask_cw_mp/timeline_test_mask_mp{suffix}.pkl"))
-# class_weight_mp = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/build_tag2label_mask_cw_mp/timeline_class_weight_mp{suffix}.pkl"))
 
 # $3 Stage: Model Preparation
 n_user = g.vcount()
@@ -265,7 +258,21 @@ elif args.model == 'heteredgegat':
         save_pickle(classid2simmat, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm-topic/classid2simmat_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl")
         save_pickle(tagid2classids, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm-topic/tagid2classids_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl")
     logger.info(f"Completed Calculating classid2simmat map={len(classid2simmat)}...")
-    
+
+    if args.use_random_multiedge:
+        # random_classid2simmat = {}
+        # for classid, simmat in classid2simmat.items():
+        #     n_simedge = simmat.coalesce().indices().shape[1]-adj.coalesce().indices().shape[1]
+        #     logger.info(n_simedge)
+        #     random_adj = sparse.random(n_user,n_user, density=n_simedge/n_user/n_user, format='coo')
+        #     random_adj = get_sparse_tensor(random_adj)
+        #     random_classid2simmat[classid] = random_adj
+        #     logger.info("Completed...")
+        parts = classid2simmat_filepath.split('/')
+        random_classid2simmat_filepath = "/".join(parts[:-1])+f"/random_"+parts[-1]
+        random_classid2simmat = load_pickle(random_classid2simmat_filepath)
+        logger.info(f"Completed Calculating random_classid2simmat map={len(random_classid2simmat)}...")
+        
     static_user_feat = np.concatenate((structural_feat,three_sort_feat),axis=1)
     static_emb = torch.FloatTensor(static_user_feat)
     dynamic_embs = [torch.FloatTensor(deepwalk_feat), torch.FloatTensor(tweet_features)]
@@ -284,25 +291,6 @@ elif args.model == 'heteredgegat':
         model = model.to(args.gpu)
 
 optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-def save_model(epoch, args, model, optimizer):
-    state = {
-        "epoch": epoch,
-        "args": args,
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict()
-    }
-    save_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/ckpt_epoch_{epoch}_model_{args.model}.pkl")
-    torch.save(state, save_filepath)
-    # help release GPU memory
-    del state
-    logger.info(f"Save State To Path={save_filepath}... Checkpoint Epoch={epoch}")
-
-def load_model(filename, model):
-    ckpt_state = torch.load(filename, map_location='cpu')
-    model.load_state_dict(ckpt_state['model'])
-    # optimizer.load_state_dict(ckpt_state['optimizer'])
-    logger.info(f"Load State From Path={filename}... Checkpoint Epoch={ckpt_state['epoch']}")
 
 def get_best_thr(y_true, y_score):
     precs, recs, thrs = precision_recall_curve(y_true, y_score)
@@ -335,8 +323,13 @@ def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
         if args.model == 'densegat':
             output = model(adj, static_emb, dynamic_embs)
         elif args.model == 'heteredgegat':
-            hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
-            hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
+            if not args.use_random_multiedge:
+                hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
+                hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
+            else:
+                hedge_adjs = [random_classid2simmat[classid].to(args.gpu) if args.cuda else random_classid2simmat[classid] for classid in tagid2classids[hashtag]]
+                hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
+                # hedge_adjs = [adj] * (args.n_component+1)
             output = model(hedge_adjs, static_emb, dynamic_embs)
         
         if best_thrs is None: # valid
@@ -395,8 +388,13 @@ def train(epoch, log_desc='train_'):
         if args.model == 'densegat':
             output = model(adj, static_emb, dynamic_embs)
         elif args.model == 'heteredgegat':
-            hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
-            hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
+            if not args.use_random_multiedge:
+                hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
+                hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
+            else:
+                hedge_adjs = [random_classid2simmat[classid].to(args.gpu) if args.cuda else random_classid2simmat[classid] for classid in tagid2classids[hashtag]]
+                hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
+                # hedge_adjs = [adj] * (args.n_component+1)
             output = model(hedge_adjs, static_emb, dynamic_embs)
         loss_train = F.nll_loss(output[train_mask], labels[train_mask], class_weight)
         alpha = train_mask.sum().item()

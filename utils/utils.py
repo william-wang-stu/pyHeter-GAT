@@ -12,6 +12,7 @@ import psutil
 import subprocess
 import random
 import configparser
+import torch
 from scipy import sparse
 from typing import Any, Dict, List
 from itertools import combinations, chain
@@ -57,6 +58,25 @@ def check_gpu_memory_usage(gpu_id:int):
     memory_free_info = subprocess.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
     memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
     return memory_free_values[gpu_id]
+
+def save_model(epoch, args, model, optimizer):
+    state = {
+        "epoch": epoch,
+        "args": args,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict()
+    }
+    save_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/ckpt_epoch_{epoch}_model_{args.model}.pkl")
+    torch.save(state, save_filepath)
+    # help release GPU memory
+    del state
+    logger.info(f"Save State To Path={save_filepath}... Checkpoint Epoch={epoch}")
+
+def load_model(filename, model):
+    ckpt_state = torch.load(filename, map_location='cpu')
+    model.load_state_dict(ckpt_state['model'])
+    # optimizer.load_state_dict(ckpt_state['optimizer'])
+    logger.info(f"Load State From Path={filename}... Checkpoint Epoch={ckpt_state['epoch']}")
 
 def summarize_distribution(data: List[Any]):
     logger.info(f"list length={len(data)}")
