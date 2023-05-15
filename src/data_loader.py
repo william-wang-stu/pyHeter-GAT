@@ -11,12 +11,15 @@ from __future__ import division
 from __future__ import print_function
 
 from lib.log import logger
-from utils.utils import load_w2v_feature
+from utils.utils import load_w2v_feature, load_pickle
+from utils.Constants import PAD_WORD, EOS_WORD, PAD, EOS
 from torch.utils.data import Dataset
 from torch.utils.data.sampler import Sampler
 from sklearn import preprocessing
 import numpy as np
 import os
+import random
+import pickle
 import torch
 import sklearn
 import itertools
@@ -38,7 +41,6 @@ class ChunkSampler(Sampler):
 
     def __len__(self):
         return self.num_samples
-
 
 class InfluenceDataSet(Dataset):
     def __init__(self, file_dir, seed, shuffle, model):
@@ -100,3 +102,214 @@ class InfluenceDataSet(Dataset):
 
     def __getitem__(self, idx):
         return self.graphs[idx], self.influence_features[idx], self.labels[idx], self.vertices[idx]
+
+class DataConstruct(object):
+    ''' For data iteration '''
+
+    def __init__(
+            self, dataset_dirpath, batch_size, seed, tmax, num_interval, data_type=0, load_dict=True, shuffle=True, append_EOS=True
+        ): # data_type=0(train), =1(valid), =2(test)
+        self.batch_size = batch_size
+        self.seed = seed
+        self.tmax = tmax
+        self.num_interval = num_interval
+        self.data_type = data_type
+        self.shuffle = shuffle
+        self.append_EOS = append_EOS
+
+        u2idx_filepath, idx2u_filepath = f"{dataset_dirpath}/u2idx.pickle", f"{dataset_dirpath}/idx2u.pickle"
+        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/cascade.txt", f"{dataset_dirpath}/cascadevalid.txt", f"{dataset_dirpath}/cascadetest.txt"
+        if not load_dict:
+            self._u2idx = {}
+            self._idx2u = []
+            self._buildIndex(train_data_filepath, valid_data_filepath, test_data_filepath)
+            with open(u2idx_filepath, 'wb') as handle:
+                pickle.dump(self._u2idx, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(idx2u_filepath, 'wb') as handle:
+                pickle.dump(self._idx2u, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            with open(u2idx_filepath, 'rb') as handle:
+                self._u2idx = pickle.load(handle)
+            with open(idx2u_filepath, 'rb') as handle:
+                self._idx2u = pickle.load(handle)
+            self.user_size = len(self._u2idx)
+            logger.info(f"User Size={self.user_size}")
+        
+        self._train_data, _train_data_len = self._readCascadeFromFile(train_data_filepath, min_user=2, max_user=500)
+        self._valid_data, _valid_data_len = self._readCascadeFromFile(valid_data_filepath, min_user=2, max_user=500)
+        self._test_data,  _test_data_len  = self._readCascadeFromFile(test_data_filepath,  min_user=2, max_user=500)
+        if self.shuffle:
+            random.seed(self.seed)
+            random.shuffle(self._train_data)
+        
+        if self.data_type == 0:
+            self.num_batch = int(np.ceil(len(self._train_data) / self.batch_size))
+        elif self.data_type == 1:
+            self.num_batch = int(np.ceil(len(self._valid_data) / self.batch_size))
+        elif self.data_type == 2:
+            self.num_batch = int(np.ceil(len(self._test_data)  / self.batch_size))
+        
+        self._iter_count = 0
+    
+    def _buildIndex(self, train_data_filepath, valid_data_filepath, test_data_filepath):
+        # compute an index of the users that appear at least once in the training and testing cascades.
+        def read_user_set(data_filepath):
+            user_set = set()
+            for line in open(data_filepath):
+                if len(line.strip()) == 0:
+                    continue
+                chunks = line.strip().split()
+                for chunk in chunks:
+                    user, timestamp = chunk.split(',')
+                    user_set.add(user)
+            return user_set
+        
+        train_user_set = read_user_set(train_data_filepath)
+        valid_user_set = read_user_set(valid_data_filepath)
+        test_user_set  = read_user_set(test_data_filepath)
+        user_set = train_user_set | valid_user_set | test_user_set
+
+        pos = 0
+        self._u2idx[PAD_WORD] = pos
+        self._idx2u.append(PAD_WORD)
+        pos += 1
+
+        self._u2idx[EOS_WORD] = pos
+        self._idx2u.append(EOS_WORD)
+        pos += 1
+
+        for user in user_set:
+            self._u2idx[user] = pos
+            self._idx2u.append(user)
+            pos += 1
+        
+        self.user_size = len(user_set) + 2
+        logger.info(f"User Size={self.user_size}")
+    
+    def _readCascadeFromFile(self, filename, min_user=2, max_user=500):
+        """read all cascade from training or testing files. """
+        total_len = 0
+        cascade_data = []
+        for line in open(filename):
+            if len(line.strip()) == 0:
+                continue
+            userlist, tslist = [], []
+            chunks = line.strip().split()
+            for chunk in chunks:
+                user, timestamp = chunk.split(',')
+                if user in self._u2idx:
+                    userlist.append(self._u2idx[user])
+                    tslist.append(int(float(timestamp)))
+            
+            if len(userlist) >= min_user and len(userlist) <= max_user:
+                total_len += len(userlist)
+                if self.append_EOS:
+                    userlist.append(EOS)
+                    tslist.append(0)
+                cascade_data.append({
+                    'user': userlist,
+                    'ts': tslist,
+                })
+        return cascade_data, total_len
+
+    def _readCascadeFromFile2(self, filename, min_user=2, max_user=500):
+        """read all cascade from training or testing files. """
+        interval = self.tmax / self.num_interval
+
+        total_len = 0
+        cascade_data = []
+        data_dict = load_pickle(filename)
+        for tag, cascades in data_dict.items():
+            userlist = [self._u2idx[elem] for elem in cascades['user']]
+            tslist = cascades['ts']
+            intervallist = np.ceil((tslist[-1]-tslist)/interval)
+            for idx, interval in enumerate(intervallist):
+                if interval > self.num_interval:
+                    intervallist[idx] = self.num_interval
+            contentlist = cascades['content']
+            # wordlist = cascades['word']
+
+            if len(userlist) >= min_user and len(userlist) <= max_user:
+                total_len += len(userlist)
+                if self.append_EOS:
+                    userlist.append(EOS)
+                    tslist.append(0)
+                    intervallist.append(0)
+                    contentlist.append(EOS_WORD)
+                cascade_data.append({
+                    'user': userlist,
+                    'ts': tslist,
+                    'interval': intervallist,
+                    'content': contentlist,
+                })
+        return cascade_data, total_len
+    
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next()
+
+    def __len__(self):
+        return self.num_batch
+
+    def next(self):
+        ''' Get the next batch '''
+
+        def pad_to_longest(insts):
+            ''' Pad the instance to the max seq length in batch '''
+            max_len = max(len(inst['user']) for inst in insts)
+            cascade_users = np.array([
+                inst['user'] + [PAD] * (max_len - len(inst['user']))
+                for inst in insts])
+            cascade_tss = np.array([
+                inst['ts'] + [0] * (max_len - len(inst['ts']))
+                for inst in insts])
+            
+            cascade_users_tensor = torch.LongTensor(cascade_users)
+            cascade_tss_tensor = torch.LongTensor(cascade_tss)
+            return cascade_users_tensor, cascade_tss_tensor
+
+        def pad_to_longest2(insts):
+            ''' Pad the instance to the max seq length in batch '''
+            max_len = max(len(inst['user']) for inst in insts)
+            cascade_users = np.array([
+                inst['user'] + [PAD] * (max_len - len(inst['user']))
+                for inst in insts])
+            cascade_tss = np.array([
+                inst['ts'] + [0] * (max_len - len(inst['ts']))
+                for inst in insts])
+            cascade_intervals = np.array([
+                inst['interval'] + [0] * (max_len - len(inst['interval']))
+                for inst in insts])
+            cascade_contents = np.array([inst['content'] for inst in insts])
+
+            cascade_users_tensor = torch.LongTensor(cascade_users)
+            cascade_tss_tensor = torch.LongTensor(cascade_tss)
+            cascade_intervals_tensor = torch.LongTensor(cascade_intervals)
+            cascade_contents_tensor = torch.LongTensor(cascade_contents)
+            return cascade_users_tensor, cascade_tss_tensor, cascade_intervals_tensor, cascade_contents_tensor
+
+        if self._iter_count < self.num_batch:
+            batch_idx = self._iter_count
+            self._iter_count += 1
+
+            start_idx, end_idx = batch_idx * self.batch_size, (batch_idx + 1) * self.batch_size
+            if self.data_type == 0:
+                seq_insts = self._train_data[start_idx:end_idx]
+            elif self.data_type == 1:
+                seq_insts = self._valid_data[start_idx:end_idx]
+            elif self.data_type == 2:
+                seq_insts = self._test_data[start_idx:end_idx]
+                        
+            seq_users, seq_tss = pad_to_longest(seq_insts)
+            return seq_users, seq_tss
+            seq_users, seq_tss, seq_intervals, seq_contents = pad_to_longest2(seq_insts)
+            return seq_users, seq_tss, seq_intervals, seq_contents
+        else:
+            if self.shuffle:
+                random.seed(self.seed)
+                random.shuffle(self._train_data)
+                        
+            self._iter_count = 0
+            raise StopIteration()

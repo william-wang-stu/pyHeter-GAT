@@ -153,3 +153,9 @@ def sample_docs_foreachuser2(docs, sample_frac=0.01, min_sample_num=3):
         sample_docs.extend(sample_texts)
     logger.info(f"sample_docs_num={len(sample_docs)}")
     return sample_docs
+
+def split_cascades(cascades:dict, train_ratio=0.8, valid_ratio=0.1):
+    keys = list(cascades.keys())
+    random.shuffle(keys)
+    train_dict_keys, valid_dict_keys, test_dict_keys = np.split(keys, [int(train_ratio*len(keys)), int((train_ratio+valid_ratio)*len(keys))])
+    return train_dict_keys, valid_dict_keys, test_dict_keys

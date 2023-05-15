@@ -8,6 +8,7 @@ from lib.log import logger
 from utils.utils import *
 from utils.graph import *
 from utils.tweet_clustering import tweet_centralized_process
+from utils.metric import compute_metrics
 from src.model import DenseSparseGAT, HeterEdgeSparseGAT
 import numpy as np
 import argparse
@@ -24,7 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
 
-def load_labels(g:igraph.Graph, cascades:List[Tuple[int,int]], args:dict)->Union[None,Tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]]:
+def load_labels(g:igraph.Graph, cascades:List[Tuple[int,int]], args:dict)->Union[None,Tuple[torch.Tensor,torch.Tensor]]:
     """
     功能: 生成训练测试用的正负样本标签
     """
@@ -38,33 +39,22 @@ def load_labels(g:igraph.Graph, cascades:List[Tuple[int,int]], args:dict)->Union
     if len(pos_users) == 0 or len(neg_users) == 0:
         return None
 
-    # 2. 划分训练测试验证集
+    # 2. 生成labels和mask
     num_user = g.vcount()
     labels = torch.zeros(num_user)
-    float_mask = np.zeros(num_user)
-
     labels[list(pos_users)] = 1
-    labels[list(neg_users)] =-1
-    for label in [-1,1]:
-        ids = np.where(labels == label)[0]
-        float_mask[ids] = np.random.permutation(np.linspace(1e-10,1,len(ids))) if args['shuffle'] else np.linspace(1e-10,1,len(ids))
-    labels[labels==-1] = 0
+    # labels[list(neg_users)] = 0
     labels = labels.long()
-    
-    train_ids = np.where((float_mask>0) & (float_mask<=args['train_ratio']/100))[0]
-    val_ids   = np.where((float_mask>args['train_ratio']/100) & (float_mask<=(args['train_ratio']+args['valid_ratio'])/100))[0]
-    test_ids  = np.where(float_mask>(args['train_ratio']+args['valid_ratio'])/100)[0]
-    # logger.info(f"train/valid/test={len(train_ids)}/{len(val_ids)}/{len(test_ids)}")
 
-    train_mask = get_binary_mask(num_user, train_ids); val_mask = get_binary_mask(num_user, val_ids); test_mask = get_binary_mask(num_user, test_ids)
+    mask = get_binary_mask(num_user, list(pos_users)+list(neg_users))
     if hasattr(torch, 'BoolTensor'):
-        train_mask = train_mask.bool(); val_mask = val_mask.bool(); test_mask = test_mask.bool()
+        mask = mask.bool()
     
     # 3. 计算NLL Loss中所需的class_weight
     nb_classes = 2
     class_weight = torch.FloatTensor((len(pos_users)+len(neg_users))/(nb_classes*np.array([len(neg_users),len(pos_users)]))) if args['class_weight_balanced'] else torch.ones(nb_classes)
     
-    return labels, train_mask, val_mask, test_mask, class_weight
+    return labels, mask, class_weight
 
 parser = argparse.ArgumentParser()
 # >> Constant
@@ -102,8 +92,8 @@ parser.add_argument('--heads', type=str, default="8,8", help="Heads in each laye
 parser.add_argument('--stage', type=int, default=Ntimestage-1, help="Time Stage (0~Ntimestage-1)")
 # parser.add_argument('--patience', type=int, default=5, help='Patience for EarlyStopping')
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--train-ratio', type=float, default=60, help="Training ratio (0, 100)")
-parser.add_argument('--valid-ratio', type=float, default=20, help="Validation ratio (0, 100)")
+parser.add_argument('--train-ratio', type=float, default=0.8, help="Training ratio (0, 100)")
+parser.add_argument('--valid-ratio', type=float, default=0.1, help="Validation ratio (0, 100)")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
 # >> Ablation Study
 parser.add_argument('--use-subgraph-dataset', action='store_true', default=False, help="Use Prepared Subgraph Dataset for DenseGAT-form Models if set true")
@@ -140,10 +130,10 @@ deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/dee
 
 # 3. User-Tweet-Mp, Tweet-Side Feats
 if args.embedding_method == 'lda':
-    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
+    # user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
     tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
 elif args.embedding_method == 'bertopic':
-    user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp_filter_lt2words_processedforbert_subg.pkl"))
+    # user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp_filter_lt2words_processedforbert_subg.pkl"))
     tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_distribution_remove_hyphen_reduce_auto.pkl"))
 elif args.embedding_method == 'llm':
     use_url_suffix = "_timeline_url" if args.use_url_timeline else ""
@@ -204,6 +194,9 @@ else:
     save_pickle({
         "label": labels_mp, "train_mask": train_mask_mp, "val_mask": val_mask_mp, "test_mask": test_mask_mp, "class_weight": class_weight_mp,
     }, tag2label_mask_cw_mp_filepath)
+
+train_dict_keys, valid_dict_keys, test_dict_keys = split_cascades(preprocess_timelines, args.train_ratio, args.valid_ratio)
+logger.info(f"train={len(train_dict_keys)}, valid={len(valid_dict_keys)}, test={len(test_dict_keys)}")
 
 # $3 Stage: Model Preparation
 n_user = g.vcount()
@@ -292,31 +285,17 @@ elif args.model == 'heteredgegat':
 
 optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-def get_best_thr(y_true, y_score):
-    precs, recs, thrs = precision_recall_curve(y_true, y_score)
-    f1s = 2 * precs * recs / (precs + recs + 1e-10)
-    f1s = f1s[:-1]
-    thrs = thrs[~np.isnan(f1s)]
-    f1s = f1s[~np.isnan(f1s)]
-    best_thr = thrs[np.argmax(f1s)]
-    # logger.info("best threshold=%4f, f1=%.4f", best_thr, np.max(f1s))
-    return best_thr
-
-def use_best_thr(best_thr, y_pred, y_score):
-    # logger.info("using threshold %.4f", best_thr)
-    y_score = np.array(y_score)
-    y_pred = np.zeros_like(y_score)
-    y_pred[y_score > best_thr] = 1
-
-def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
+def evaluate(epoch, dict_keys, best_thr=None, return_best_thr=False, log_desc='valid_'):
     model.eval()
 
     loss, correct, total, prec, rec, f1 = 0., 0., 0., 0., 0., 0.
-    y_true, y_pred, y_score, thrs = [], [], [], {}
-    for hashtag in sorted(preprocess_timelines.keys()):
+    y_true, y_pred, y_score, series_y_true, series_y_prob = [], [], [], [], []
+    for hashtag in dict_keys:
         if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
+        cascade_users = [elem[0] for elem in preprocess_timelines[hashtag]]
 
-        labels, val_mask, test_mask, class_weight = labels_mp[hashtag], val_mask_mp[hashtag], test_mask_mp[hashtag], class_weight_mp[hashtag]
+        labels, train_mask, val_mask, test_mask, class_weight = labels_mp[hashtag], train_mask_mp[hashtag], val_mask_mp[hashtag], test_mask_mp[hashtag], class_weight_mp[hashtag]
+        mask = train_mask + val_mask + test_mask
         if args.cuda:
             labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
         
@@ -332,55 +311,66 @@ def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
                 # hedge_adjs = [adj] * (args.n_component+1)
             output = model(hedge_adjs, static_emb, dynamic_embs)
         
-        if best_thrs is None: # valid
-            loss_batch = F.nll_loss(output[val_mask], labels[val_mask], class_weight)
-            y_true_cur = labels[val_mask].data.tolist()
-            y_pred_cur = output[val_mask].max(1)[1].data.tolist()
-            y_true += y_true_cur
-            y_pred += y_pred_cur
-            y_score_cur = output[val_mask][:, 1].data.tolist()
-            y_score += y_score_cur
-            thrs[hashtag] = get_best_thr(y_true_cur, y_score_cur)
-            alpha = val_mask.sum().item()
-        else: # test
-            loss_batch = F.nll_loss(output[test_mask], labels[test_mask], class_weight)
-            y_true_cur = labels[test_mask].data.tolist()
-            y_pred_cur = output[test_mask].max(1)[1].data.tolist()
-            y_true += y_true_cur
-            y_pred += y_pred_cur
-            y_score_cur = output[test_mask][:, 1].data.tolist()
-            y_score += y_score_cur
-            use_best_thr(best_thrs[hashtag], y_pred_cur, y_score_cur)
-            alpha = test_mask.sum().item()
+        loss_batch = F.nll_loss(output[mask], labels[mask], class_weight)
+        y_true_cur = labels[mask].data.tolist()
+        y_pred_cur = output[mask].max(1)[1].data.tolist()
+        y_score_cur = output[mask][:, 1].data.tolist()
+        y_true += y_true_cur; y_pred += y_pred_cur; y_score += y_score_cur
+
+        alpha = mask.sum().item()
+        loss += alpha * loss_batch.item()
         correct += alpha * np.mean(np.array(y_true_cur) == np.array(y_pred_cur))
-        loss  += alpha * loss_batch.item()
         total += alpha
+        
+        series_y_true.append([cascade_users[-1]])
+        y_prob = np.zeros(n_user)
+        y_prob[mask] = y_score_cur
+        series_y_prob.append(y_prob)
     
     model.train()
+
+    if best_thr is not None:
+        logger.info("using threshold %.4f", best_thr)
+        y_score = np.array(y_score)
+        y_pred = np.zeros_like(y_score)
+        y_pred[y_score > best_thr] = 1
 
     prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary")
     auc = roc_auc_score(y_true, y_score)
     logger.info("%sloss: %.4f Acc: %.4f AUC: %.4f Prec: %.4f Rec: %.4f F1: %.4f", log_desc, loss / total, correct / total, auc, prec, rec, f1)
+    
+    scores = compute_metrics(series_y_prob, series_y_true)
+    logger.info(f"MRR={scores['MRR']}, hits@10={scores['hits@10']}, map@10={scores['map@10']}, hits@50={scores['hits@50']}, map@100={scores['map@100']}, hits@100={scores['hits@100']}, map@100={scores['map@100']},")
+    
     # tensorboard_logger.log_value(log_desc+'loss', loss / total, epoch+1)
     writer.add_scalar(log_desc+'loss', loss / total, epoch+1)
-    writer.add_scalar(log_desc+'acc', correct / total, epoch+1)
-    writer.add_scalar(log_desc+'auc', auc, epoch+1)
-    writer.add_scalar(log_desc+'prec', prec, epoch+1)
-    writer.add_scalar(log_desc+'rec', rec, epoch+1)
-    writer.add_scalar(log_desc+'f1', f1, epoch+1)
+    writer.add_scalar(log_desc+'acc', correct / total, epoch+1);        writer.add_scalar(log_desc+'mrr', scores['MRR'], epoch+1)
+    writer.add_scalar(log_desc+'hits@10', scores['hits@10'], epoch+1);  writer.add_scalar(log_desc+'map@10', scores['map@10'], epoch+1)
+    writer.add_scalar(log_desc+'hits@50', scores['hits@50'], epoch+1);  writer.add_scalar(log_desc+'map@50', scores['map@50'], epoch+1)
+    writer.add_scalar(log_desc+'hits@100', scores['hits@100'], epoch+1);writer.add_scalar(log_desc+'map@100', scores['map@100'], epoch+1)
+    writer.add_scalar(log_desc+'auc', auc, epoch+1);                    writer.add_scalar(log_desc+'f1', f1, epoch+1)
+    writer.add_scalar(log_desc+'prec', prec, epoch+1);                  writer.add_scalar(log_desc+'rec', rec, epoch+1)
 
     if return_best_thr:
-        return thrs
+        precs, recs, thrs = precision_recall_curve(y_true, y_score)
+        f1s = 2 * precs * recs / (precs + recs + 1e-10)
+        f1s = f1s[:-1]
+        thrs = thrs[~np.isnan(f1s)]
+        f1s = f1s[~np.isnan(f1s)]
+        best_thr = thrs[np.argmax(f1s)]
+        logger.info("best threshold=%4f, f1=%.4f", best_thr, np.max(f1s))
+        return best_thr
     else:
         return None
 
-def train(epoch, log_desc='train_'):
+def train(epoch, dict_keys, log_desc='train_'):
     model.train()
     loss, total = 0., 0.
-    for hashtag in sorted(preprocess_timelines.keys()):
+    for hashtag in sorted(dict_keys):
         if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
 
-        labels, train_mask, class_weight = labels_mp[hashtag], train_mask_mp[hashtag], class_weight_mp[hashtag]
+        labels, train_mask, val_mask, test_mask, class_weight = labels_mp[hashtag], train_mask_mp[hashtag], val_mask_mp[hashtag], test_mask_mp[hashtag], class_weight_mp[hashtag]
+        mask = train_mask + val_mask + test_mask
         if args.cuda:
             labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
         
@@ -396,8 +386,8 @@ def train(epoch, log_desc='train_'):
                 hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
                 # hedge_adjs = [adj] * (args.n_component+1)
             output = model(hedge_adjs, static_emb, dynamic_embs)
-        loss_train = F.nll_loss(output[train_mask], labels[train_mask], class_weight)
-        alpha = train_mask.sum().item()
+        loss_train = F.nll_loss(output[mask], labels[mask], class_weight)
+        alpha = mask.sum().item()
         loss  += alpha * loss_train.item()
         total += alpha
         loss_train.backward()
@@ -408,18 +398,18 @@ def train(epoch, log_desc='train_'):
 
     if (epoch + 1) % args.check_point == 0:
         logger.info("epoch %d, checkpoint!", epoch)
-        best_thrs = evaluate(epoch, return_best_thr=True, log_desc='valid_')
-        evaluate(epoch, best_thrs=best_thrs, log_desc='test_')
+        best_thr = evaluate(epoch, valid_dict_keys, return_best_thr=True, log_desc='valid_')
+        evaluate(epoch, test_dict_keys, best_thr=best_thr, log_desc='test_')
         save_model(epoch, args, model, optimizer)
 
 t_total = time.time()
 logger.info("training...")
 for epoch in range(args.epochs):
-    train(epoch)
+    train(epoch, train_dict_keys)
 logger.info("optimization Finished!")
 logger.info("total time elapsed: {:.4f}s".format(time.time() - t_total))
 
 logger.info("retrieve best threshold...")
-best_thrs = evaluate(args.epochs, return_best_thr=True, log_desc='valid_')
+best_thr = evaluate(args.epochs, valid_dict_keys, return_best_thr=True, log_desc='valid_')
 logger.info("testing...")
-evaluate(args.epochs, best_thrs=best_thrs, log_desc='test_')
+evaluate(args.epochs, test_dict_keys, best_thr=best_thr, log_desc='test_')
