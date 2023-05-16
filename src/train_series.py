@@ -7,9 +7,10 @@ from lib.utils import get_sparse_tensor
 from lib.log import logger
 from utils.utils import *
 from utils.graph import *
+from utils.graph_aminer import *
 from utils.tweet_clustering import tweet_centralized_process
 from utils.metric import compute_metrics
-from utils.Constants import PAD
+from utils.Constants import PAD, EOS
 from utils.Optim import ScheduledOptim
 from src.data_loader import DataConstruct
 from src.model import DenseSparseGAT, HeterEdgeSparseGAT
@@ -21,6 +22,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from itertools import chain
+from torch_geometric.data import Data
 from sklearn import preprocessing
 from sklearn.decomposition import PCA
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
@@ -74,114 +76,49 @@ torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
-def get_performance(crit, pred, gold):
-    ''' Apply label smoothing if needed '''
-    loss = crit(pred, gold.contiguous().view(-1))
-    pred = pred.max(1)[1]
+def get_cascade_criterion(user_size):
+    ''' With PAD token zero weight '''
+    weight = torch.ones(user_size)
+    weight[PAD] = 0
+    weight[EOS] = 0
+    return torch.nn.CrossEntropyLoss(weight, size_average=False)
 
-    gold = gold.contiguous().view(-1)
-    # print ("get performance, ", gold.shape, pred.shape)
-    n_correct = pred.data.eq(gold.data)
-    n_correct = n_correct.masked_select(gold.ne(PAD).data).sum().float()
+def get_performance(criterion, pred_cascade, gold_cascade):
+    '''
+    pred_cascade: (#samples, #user_size), gold_cascade: (#samples,)
+    '''
+    pred_cascade = pred_cascade.max(1)[1]
+    gold_cascade = gold_cascade.contiguous().view(-1)
+    loss = criterion(pred_cascade, gold_cascade)
+
+    n_correct = pred_cascade.data.eq(gold_cascade.data)
+    n_correct = n_correct.masked_select(gold_cascade.ne(PAD).data).sum().float()
+    # n_correct = n_correct.masked_select((gold_cascade.ne(PAD)*gold_cascade.ne(EOS)).data).sum().float()
     return loss, n_correct
 
-def evaluate(epoch, best_thrs=None, return_best_thr=False, log_desc='valid_'):
-    model.eval()
-
-    loss, correct, total, prec, rec, f1 = 0., 0., 0., 0., 0., 0.
-    y_true, y_pred, y_score, thrs = [], [], [], {}
-    series_y_true, series_y_prob = [], []
-    for hashtag in sorted(preprocess_timelines.keys()):
-        if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
-        cascade_users = [elem[0] for elem in preprocess_timelines[hashtag]]
-
-        labels, val_mask, test_mask, class_weight = labels_mp[hashtag], val_mask_mp[hashtag], test_mask_mp[hashtag], class_weight_mp[hashtag]
-        if args.cuda:
-            labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
-        
-        if args.model == 'densegat':
-            output = model(adj, static_emb, dynamic_embs)
-        elif args.model == 'heteredgegat':
-            if not args.use_random_multiedge:
-                hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
-                hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
-            else:
-                hedge_adjs = [random_classid2simmat[classid].to(args.gpu) if args.cuda else random_classid2simmat[classid] for classid in tagid2classids[hashtag]]
-                hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
-                # hedge_adjs = [adj] * (args.n_component+1)
-            output = model(hedge_adjs, static_emb, dynamic_embs)
-        
-        if best_thrs is None: # valid
-            loss_batch = F.nll_loss(output[val_mask], labels[val_mask], class_weight)
-            y_true_cur = labels[val_mask].data.tolist()
-            y_pred_cur = output[val_mask].max(1)[1].data.tolist()
-            y_true += y_true_cur
-            y_pred += y_pred_cur
-            y_score_cur = output[val_mask][:, 1].data.tolist()
-            y_score += y_score_cur
-            thrs[hashtag] = get_best_thr(y_true_cur, y_score_cur)
-            alpha = val_mask.sum().item()
-        else: # test
-            loss_batch = F.nll_loss(output[test_mask], labels[test_mask], class_weight)
-            y_true_cur = labels[test_mask].data.tolist()
-            y_pred_cur = output[test_mask].max(1)[1].data.tolist()
-            y_true += y_true_cur
-            y_pred += y_pred_cur
-            y_score_cur = output[test_mask][:, 1].data.tolist()
-            y_score += y_score_cur
-            use_best_thr(best_thrs[hashtag], y_pred_cur, y_score_cur)
-            alpha = test_mask.sum().item()
-        correct += alpha * np.mean(np.array(y_true_cur) == np.array(y_pred_cur))
-        loss  += alpha * loss_batch.item()
-        total += alpha
-        series_y_true.append([cascade_users[-1]])
-        series_y_prob.append(y_score_cur)
-    
-    model.train()
-
-    prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary")
-    auc = roc_auc_score(y_true, y_score)
-    logger.info("%sloss: %.4f Acc: %.4f AUC: %.4f Prec: %.4f Rec: %.4f F1: %.4f", log_desc, loss / total, correct / total, auc, prec, rec, f1)
-    
-    scores = compute_metrics(series_y_prob, series_y_true)
-    logger.info(f"MRR={scores['MRR']}, hits@10={scores['hits@10']}, map@10={scores['map@10']}, hits@50={scores['hits@50']}, map@100={scores['map@100']}, hits@100={scores['hits@100']}, map@100={scores['map@100']},")
-    
-    # tensorboard_logger.log_value(log_desc+'loss', loss / total, epoch+1)
-    writer.add_scalar(log_desc+'loss', loss / total, epoch+1)
-    writer.add_scalar(log_desc+'acc', correct / total, epoch+1)
-    writer.add_scalar(log_desc+'mrr', scores['MRR'], epoch+1)
-    writer.add_scalar(log_desc+'hits@10', scores['hits@10'], epoch+1)
-    writer.add_scalar(log_desc+'map@10', scores['map@10'], epoch+1)
-    writer.add_scalar(log_desc+'hits@50', scores['hits@50'], epoch+1)
-    writer.add_scalar(log_desc+'map@50', scores['map@50'], epoch+1)
-    writer.add_scalar(log_desc+'hits@100', scores['hits@100'], epoch+1)
-    writer.add_scalar(log_desc+'map@100', scores['map@100'], epoch+1)
-    writer.add_scalar(log_desc+'auc', auc, epoch+1)
-    writer.add_scalar(log_desc+'prec', prec, epoch+1)
-    writer.add_scalar(log_desc+'rec', rec, epoch+1)
-    writer.add_scalar(log_desc+'f1', f1, epoch+1)
-
-    if return_best_thr:
-        return thrs
-    else:
-        return None
+def get_scores(pred_cascade, gold_cascade, k_list=[10,50,100]):
+    # pred_cascade = pred_cascade.max(1)[0].detach().cpu().numpy()
+    pred_cascade = pred_cascade.detach().cpu().numpy()
+    gold_cascade = gold_cascade.contiguous().view(-1).detach().cpu().numpy()
+    scores = compute_metrics(pred_cascade, gold_cascade, k_list)
+    return scores
 
 def train(epoch_i, batch_data, model, optimizer, loss_func, writer, log_desc='train_'):
     model.train()
 
     loss, correct, total = 0., 0., 0.
-    for batch_i, batch in enumerate(tqdm(batch_data)):
+    for _, batch in enumerate(tqdm(batch_data)):
         # if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
         # labels, train_mask, class_weight = labels_mp[hashtag], train_mask_mp[hashtag], class_weight_mp[hashtag]
         # if args.cuda:
         #     labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
 
         cascade_users, cascade_tss, cascade_intervals, cascade_contents = (item.to(args.gpu) for item in batch)
-        gold = cascade_users[:, 1:]
+        gold_cascade = cascade_users[:, 1:]
 
         optimizer.zero_grad()
         if args.model == 'densegat':
-            output = model(adj, static_emb, dynamic_embs)
+            pred_cascade = model(adj, static_emb, dynamic_embs)
         # elif args.model == 'heteredgegat':
         #     if not args.use_random_multiedge:
         #         hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
@@ -195,113 +132,135 @@ def train(epoch_i, batch_data, model, optimizer, loss_func, writer, log_desc='tr
         # alpha = train_mask.sum().item()
         # loss  += alpha * loss_train.item()
         # total += alpha
-        loss, n_correct = get_performance(loss_func, output, gold)
-        loss.backward()
+        loss_batch, n_correct = get_performance(loss_func, pred_cascade, gold_cascade)
+        loss_batch.backward()
         optimizer.step()
         optimizer.update_learning_rate()
 
-        n_words = gold.data.ne(PAD).sum().float()
-        loss += n_words * loss.item()
+        n_words = gold_cascade.ne(PAD).data.sum().float()
+        # n_words = (gold_cascade.ne(PAD)*(gold_cascade.ne(EOS))).data.sum().float()
+        loss += loss_batch.item()
         correct += n_correct.item()
         total += n_words
     logger.info(f"epoch {epoch_i} loss={loss/total}, acc={n_correct/total}, GPU Memory Usage={check_gpu_memory_usage(int(args.gpu[-1]))} MiB")
-    # tensorboard_logger.log_value(log_desc+'loss', loss / total, epoch+1)
-    writer.add_scalar(log_desc+'loss', loss / total, epoch+1)
+    writer.add_scalar(log_desc+'loss', loss/total, epoch_i+1)
+    writer.add_scalar(log_desc+'acc',  n_correct/total, epoch_i+1)
 
-def train_epoch(model, training_data, graph, diffusion_graph, loss_func, optimizer, epoch_i):
-    for i, batch in enumerate(tqdm(training_data)): # tqdm(training_data, mininterval=2, desc='  - (Training)   ', leave=False):
-        # prepare data
-        tgt, tgt_timestamp = (item.cuda() for item in batch)
-
-        start_time = time.time() 
-        np.set_printoptions(threshold=np.inf)
-        gold = tgt[:, 1:]
-
-        n_words = gold.data.ne(PAD).sum().float()
-        n_total_words += n_words
-        batch_num += tgt.size(0)
-
-        optimizer.zero_grad()
-        pred = model(tgt, tgt_timestamp, graph, diffusion_graph)
-        # backward
-        loss, n_correct = get_performance(loss_func, pred, gold)
-        loss.backward()
-
-        # update parameters
-        optimizer.step()
-        optimizer.update_learning_rate()
-
-        # note keeping
-        n_total_correct += n_correct.item()
-        total_loss += loss.item()
-        print("epoch " + str(epoch_i+1) + " Training batch ", i, " loss: ", loss.item(), " acc:", (n_correct.item()/len(pred)) )
-        # print ("A Batch Time: ", str(time.time()-start_time))
-
-    return total_loss/n_total_words, n_total_correct/n_total_words
-
-def test_epoch(model, validation_data, graph, diffusion_graph, k_list=[10, 50, 100]):
-    ''' Epoch operation in evaluation phase '''
+def evaluate(epoch_i, batch_data, model, optimizer, loss_func, writer, k_list=[10,50,100], log_desc='valid_'):
     model.eval()
 
-    scores = {}
+    loss, correct, total = 0., 0., 0.
+    scores = {'MRR': 0,}
     for k in k_list:
-        scores['hits@' + str(k)] = 0
-        scores['map@' + str(k)] = 0
+        scores[f'hits@{k}'] = 0
+        scores[f'map@{k}'] = 0
+    # loss, correct, total, prec, rec, f1 = 0., 0., 0., 0., 0., 0.
+    # y_true, y_pred, y_score, series_y_true, series_y_prob = [], [], [], [], []
+    for _, batch in enumerate(tqdm(batch_data)):
+        # if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
+        # cascade_users = [elem[0] for elem in preprocess_timelines[hashtag]]
 
-    n_total_words = 0
-    for i, batch in enumerate(validation_data):  #tqdm(validation_data, mininterval=2, desc='  - (Validation) ', leave=False):
-        print("Validation batch ", i)
-        # prepare data
-        tgt, tgt_timestamp = batch
-        y_gold = tgt[:, 1:].contiguous().view(-1).detach().cpu().numpy()
+        cascade_users, cascade_tss, cascade_intervals, cascade_contents = (item.to(args.gpu) for item in batch)
+        gold_cascade = cascade_users[:, 1:]
 
-        # forward
-        pred = model(tgt, tgt_timestamp, graph, diffusion_graph)
-        y_pred = pred.detach().cpu().numpy()
+        # labels, train_mask, val_mask, test_mask, class_weight = labels_mp[hashtag], train_mask_mp[hashtag], val_mask_mp[hashtag], test_mask_mp[hashtag], class_weight_mp[hashtag]
+        # mask = train_mask + val_mask + test_mask
+        # if args.cuda:
+        #     labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
+        
+        if args.model == 'densegat':
+            pred_cascade = model(adj, static_emb, dynamic_embs)
+        # elif args.model == 'heteredgegat':
+        #     if not args.use_random_multiedge:
+        #         hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
+        #         hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
+        #     else:
+        #         hedge_adjs = [random_classid2simmat[classid].to(args.gpu) if args.cuda else random_classid2simmat[classid] for classid in tagid2classids[hashtag]]
+        #         hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
+        #         # hedge_adjs = [adj] * (args.n_component+1)
+        #     output = model(hedge_adjs, static_emb, dynamic_embs)
+        
+        loss_batch, n_correct = get_performance(loss_func, pred_cascade, gold_cascade)
+        n_words = gold_cascade.ne(PAD).data.sum().float()
+        # n_words = (gold_cascade.ne(PAD)*(gold_cascade.ne(EOS))).data.sum().float()
+        loss += loss_batch.item()
+        correct += n_correct.item()
+        total += n_words
 
-        scores_batch, scores_len = metric.compute_metric(y_pred, y_gold, k_list)
-        n_total_words += scores_len
+        scores_batch = get_scores(pred_cascade, gold_cascade, k_list)
+        scores['MRR'] += scores_batch['MRR'] * n_words
         for k in k_list:
-            scores['hits@' + str(k)] += scores_batch['hits@' + str(k)] * scores_len
-            scores['map@' + str(k)] += scores_batch['map@' + str(k)] * scores_len
-
+            scores[f'hits@{k}'] += scores_batch[f'hits@{k}'] * n_words
+            scores[f'map@{k}'] += scores_batch[f'map@{k}'] * n_words
+    
+    model.train()
+    
+    scores['MRR'] /= total
     for k in k_list:
-        scores['hits@' + str(k)] = scores['hits@' + str(k)] / n_total_words
-        scores['map@' + str(k)] = scores['map@' + str(k)] / n_total_words
-
-    return scores
+        scores[f'hits@{k}'] /= total
+        scores[f'map@{k}'] /= total
+    logger.info(f"MRR={scores['MRR']}, hits@10={scores['hits@10']}, map@10={scores['map@10']}, hits@50={scores['hits@50']}, map@100={scores['map@100']}, hits@100={scores['hits@100']}, map@100={scores['map@100']},")
+    
+    # tensorboard_logger.log_value(log_desc+'loss', loss / total, epoch+1)
+    writer.add_scalar(log_desc+'loss', loss/total, epoch_i+1); writer.add_scalar(log_desc+'acc', correct/total, epoch_i+1); writer.add_scalar(log_desc+'mrr', scores['MRR'], epoch_i+1)
+    writer.add_scalar(log_desc+'hits@10', scores['hits@10'], epoch_i+1);  writer.add_scalar(log_desc+'map@10', scores['map@10'], epoch_i+1)
+    writer.add_scalar(log_desc+'hits@50', scores['hits@50'], epoch_i+1);  writer.add_scalar(log_desc+'map@50', scores['map@50'], epoch_i+1)
+    writer.add_scalar(log_desc+'hits@100', scores['hits@100'], epoch_i+1);writer.add_scalar(log_desc+'map@100', scores['map@100'], epoch_i+1)
+    # writer.add_scalar(log_desc+'auc', auc, epoch_i+1);                    writer.add_scalar(log_desc+'f1', f1, epoch_i+1)
+    # writer.add_scalar(log_desc+'prec', prec, epoch_i+1);                  writer.add_scalar(log_desc+'rec', rec, epoch_i+1)
 
 def main():
+    # torch.set_num_threads(4)
+
+    user_ids = read_user_ids()
+    edges = get_static_subnetwork(user_ids)
+    edges = list(zip(*edges))
+    edges_t = torch.LongTensor(edges).t()
+    weight_t = torch.FloatTensor([1]*len(edges))
+    graph = Data(edge_index=edges_t, edge_weight=weight_t)
+
     train_data = DataConstruct(dataset_dirpath="", batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=0, load_dict=True)
     valid_data = DataConstruct(dataset_dirpath="", batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=1, load_dict=False)
     test_data  = DataConstruct(dataset_dirpath="", batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=2, load_dict=False)
 
     loss_func = torch.nn.CrossEntropyLoss(size_average=False, ignore_index=PAD)
+    # loss_func = get_cascade_criterion(train_data.user_size)
 
     # optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     optimizer = ScheduledOptim(
         optim.Adagrad(model.parameters(), betas=(0.9, 0.98), eps=1e-09), 
         args.d_model, args.n_warmup_steps,)
     
+    if args.cuda:
+        # model = model.to(args.gpu)
+        loss_func = loss_func.to(args.gpu)
+    
+    tensorboard_log_dir = 'tensorboard/tensorboard_%s_stage%d_epochs%d_lr%f_t%d' % (args.tensorboard_log, args.stage, args.epochs, args.lr, args.tweet_per_user)
+    os.makedirs(tensorboard_log_dir, exist_ok=True)
+    shutil.rmtree(tensorboard_log_dir)
+    writer = SummaryWriter(tensorboard_log_dir)
+    logger.info('tensorboard logging to %s', tensorboard_log_dir)
+
     t_total = time.time()
     logger.info("training...")
     for epoch_i in range(args.epochs):
         start = time.time()
-        train_loss, train_accu = train_epoch(model, train_data, diffusion_graph, loss_func, optimizer, epoch_i)
+        train_loss, train_acc = train(epoch_i, train_data, model, optimizer, loss_func, writer)
         logger.info('   - (Training)    loss: {loss: 8.5f}, accuracy: {accu:3.3f} %, elapse: {elapse:3.3f} min'.format(
-            loss=train_loss, accu=100 * train_accu, elapse=(time.time()-start)/60))
+            loss=train_loss, accu=100*train_acc, elapse=(time.time()-start)/60))
         
         if (epoch_i + 1) % args.check_point == 0:
-            logger.info("epoch %d, checkpoint!", epoch)
+            logger.info("epoch %d, checkpoint!", epoch_i)
             start = time.time()
-            scores = test_epoch(model, valid_data, diffusion_graph)
+            scores = evaluate(epoch_i, valid_data, model, optimizer, loss_func, writer)
             logger.info('   - (Validating)    scores: {scores}, elapse: {elapse:3.3f} min'.format(
                 scores="/".join([f"{key}-{value}" for key,value in scores.items()]),
                 elapse=(time.time()-start)/60))
             
-            scores = test_epoch(model, test_data, diffusion_graph)
+            scores = evaluate(epoch_i, test_data, model, optimizer, loss_func, writer)
             logger.info('   - (Testing)    scores: {scores}'.format(
                 scores="/".join([f"{key}-{value}" for key,value in scores.items()]),))
+            save_model(epoch_i, args, model, optimizer)
     logger.info("Total Elapse: {elapse:3.3f} min".format(elapse=(time.time()-t_total)/60))
 
 main()
