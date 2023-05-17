@@ -3,10 +3,10 @@
 # import os
 # sys.path.append(os.path.dirname(os.getcwd()))
 from lib.log import logger
-from lib.utils import get_node_types, extend_edges, get_sparse_tensor
+# from lib.utils import get_node_types, extend_edges, get_sparse_tensor
 import pickle
 import numpy as np
-import pandas as pd
+# import pandas as pd
 import os
 import psutil
 import subprocess
@@ -21,15 +21,15 @@ from sklearn.decomposition import PCA
 # from numba import types
 # from numba.typed import Dict, List
 
-config = configparser.ConfigParser()
-# NOTE: realpath(__file__)是在获取执行这段代码所属文件的绝对路径, 即~/pyHeter-GAT/src/config.ini
-config.read(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'src/config.ini'))
-DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
-Ntimestage = int(config['DEFAULT']['Ntimestage'])
+# config = configparser.ConfigParser()
+# # NOTE: realpath(__file__)是在获取执行这段代码所属文件的绝对路径, 即~/pyHeter-GAT/src/config.ini
+# config.read(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'src/config.ini'))
+# DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
+# Ntimestage = int(config['DEFAULT']['Ntimestage'])
 
 def save_pickle(obj, filename):
     _, ext = os.path.splitext(filename)
-    if ext in ['.pkl','.p']:
+    if ext in ['.pkl','.p','.data']:
         with open(filename, "wb") as f:
             pickle.dump(obj, f)
     elif ext == '.npy':
@@ -41,7 +41,7 @@ def save_pickle(obj, filename):
 
 def load_pickle(filename):
     _, ext = os.path.splitext(filename)
-    if ext in ['.pkl','.p']:
+    if ext in ['.pkl','.p','.data']:
         with open(filename, "rb") as f:
             data = pickle.load(f)
         return data

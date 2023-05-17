@@ -17,19 +17,19 @@ def get_previous_user_mask(seq, user_size):
     seqs = seq.repeat(1,1,seq.size(1)).view(seq.size(0), seq.size(1), seq.size(1))
     previous_mask = np.tril(np.ones(prev_shape)).astype('float32')
     previous_mask = torch.from_numpy(previous_mask)
-    if seq.is_cuda:
-        previous_mask = previous_mask.cuda()
+    # if seq.is_cuda:
+    #     previous_mask = previous_mask.cuda()
     
     masked_seq = previous_mask * seqs.data.float()
 
     # force the 0th dimension (PAD) to be masked
     PAD_tmp = torch.zeros(seq.size(0), seq.size(1), 1)
-    if seq.is_cuda:
-        PAD_tmp = PAD_tmp.cuda()
+    # if seq.is_cuda:
+    #     PAD_tmp = PAD_tmp.cuda()
     masked_seq = torch.cat([masked_seq,PAD_tmp],dim=2)
     ans_tmp = torch.zeros(seq.size(0), seq.size(1), user_size)
-    if seq.is_cuda:
-        ans_tmp = ans_tmp.cuda()
+    # if seq.is_cuda:
+    #     ans_tmp = ans_tmp.cuda()
     masked_seq = ans_tmp.scatter_(2,masked_seq.long(),float('-inf'))
     return masked_seq
 
@@ -40,7 +40,7 @@ class GATNetwork(nn.Module):
 
         self.dropout = dropout
         self.layer_stack, self.batchnorm_stack = self._build_layer_stack(extend_units=[n_feat]+n_units, n_heads=n_heads, attn_dropout=attn_dropout)
-        self.init_weights()
+        # self.init_weights()
 
     def init_weights(self):
         for layer in self.layer_stack:
@@ -67,7 +67,8 @@ class GATNetwork(nn.Module):
         graph_weight = graph.edge_weight
 
         for layer_i, (gat_layer, batchnorm_layer) in enumerate(zip(self.layer_stack, self.batchnorm_stack)):
-            emb = gat_layer(emb, graph_edge_index, graph_weight)
+            # emb = gat_layer(emb, graph_edge_index, graph_weight)
+            emb = gat_layer(x=emb, edge_index=graph_edge_index)
             if layer_i < len(self.layer_stack)-1:
                 emb = batchnorm_layer(emb)
                 emb = F.elu(emb)
@@ -76,28 +77,27 @@ class GATNetwork(nn.Module):
         return emb
 
 class TimeAttention_New(nn.Module):
-    def __init__(self, time_size, in_features1):
+    def __init__(self, num_interval, in_features1):
         super(TimeAttention_New, self).__init__()
-        self.time_size = time_size
-        self.time_embedding = nn.Embedding(time_size, in_features1)
+        self.time_embedding = nn.Embedding(num_interval, in_features1)
         init.xavier_normal_(self.time_embedding.weight)
         self.dropout = nn.Dropout(0.3)
 
     def forward(self, T_idx, Dy_U_embed, mask=None, episilon=1e-6):
         '''
             T_idx: (bsz, user_len)
-            Dy_U_embed: (bsz, user_len, time_len, d) # uid 从动态embedding lookup 之后的节点向量
+            Dy_U_embed: (bsz, user_len, d) # uid 从动态embedding lookup 之后的节点向量
             output: (bsz, user_len, d)
         '''
         temperature = Dy_U_embed.size(-1) ** 0.5 + episilon
         T_embed = self.time_embedding(T_idx) # (bsz, user_len, d)
 
-
         affine = torch.einsum("bqd,bkd->bqk", Dy_U_embed, T_embed) # (bsz, user_len, time_len)
         score = affine / temperature
 
-        pad_mask = mask.unsqueeze(dim=-1).expand(-1, -1, mask.size(1)).cuda()
-        mask = torch.triu(torch.ones(pad_mask.size()), diagonal=1).bool().cuda()  # 上三角
+        pad_mask = mask.unsqueeze(dim=-1).expand(-1, -1, mask.size(1))
+        mask = torch.triu(torch.ones(pad_mask.size()), diagonal=1).bool()  # 上三角
+        # if pad_mask is cuda, then mask = mask.cuda()
         mask_ = mask + pad_mask
         score = score.masked_fill(mask_, -2 ** 32 + 1)
 
@@ -107,11 +107,11 @@ class TimeAttention_New(nn.Module):
         return att
 
 class BasicGATNetwork(nn.Module):
-    def __init__(self, static_nfeat, dynamic_nfeats, n_units, n_heads, shape_ret,
+    def __init__(self, n_feat, n_units, n_heads, num_interval, shape_ret,
         attn_dropout, dropout, instance_normalization=False,
     ):
         """
-        shape_ret: (, #user)
+        shape_ret: (n_units[-1], #user)
         """
         super(BasicGATNetwork, self).__init__()
 
@@ -121,12 +121,11 @@ class BasicGATNetwork(nn.Module):
         #     for i, dynamic_nfeat in enumerate(dynamic_nfeats):
         #         norm = nn.InstanceNorm1d(dynamic_nfeat, momentum=0.0, affine=True)
         #         setattr(self, f"norm-{i}", norm)
-        n_feat = static_nfeat + sum(dynamic_nfeats)
         self.user_size = shape_ret[1]
-        self.user_emb = nn.Embedding(self.user_size, n_units[0], padding_idx=PAD)
+        self.user_emb = nn.Embedding(self.user_size, n_feat, padding_idx=PAD)
         self.gat_network = GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout)
-        self.time_attention = TimeAttention_New(time_size=8, in_features1=n_units[0])
-        self.fc_network = nn.Linear(shape_ret)
+        self.time_attention = TimeAttention_New(num_interval=num_interval, in_features1=n_units[0])
+        self.fc_network = nn.Linear(shape_ret[0], shape_ret[1])
         self.init_weights()
     
     def init_weights(self):
@@ -143,10 +142,12 @@ class BasicGATNetwork(nn.Module):
         #     norm_embs.append(norm_emb)
         # emb = torch.cat(norm_embs, dim=1)
         # emb = torch.cat((emb,static_emb),dim=1)
+        cas_uids = cas_uids[:,:-1]
+        cas_intervals = cas_intervals[:,:-1]
 
-        user_emb = self.user_emb([i for i in range(self.user_size)])
+        user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]))
         graph_emb = self.gat_network(graph, user_emb)
-        seq_embs = graph_emb(cas_uids)
+        seq_embs = F.embedding(cas_uids, graph_emb)
 
         mask = (cas_uids == PAD)
         seq_embs = self.time_attention(cas_intervals, seq_embs, mask)

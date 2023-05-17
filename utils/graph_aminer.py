@@ -26,7 +26,8 @@ def read_static_network():
 
 def get_static_subnetwork(user_ids:set):
     # Weibo Network: Static Following Network
-    weibo_network_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/weibo_network.txt"
+    # weibo_network_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/weibo_network.txt"
+    weibo_network_filepath = "/root/pyHeter-GAT/weibo/weibo_network.txt"
 
     edges = []
     with open(weibo_network_filepath, 'r') as f:
@@ -48,7 +49,8 @@ def get_static_subnetwork(user_ids:set):
                     if relation == 1:
                         edges.append((uid2,uid1))
     
-    save_pickle(edges, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/edgelist_subgraph.pkl")
+    # save_pickle(edges, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/edgelist_subgraph.pkl")
+    save_pickle(edges, "/root/pyHeter-GAT/weibo/edges.pkl")
     logger.info(len(edges))
     return edges
 
@@ -188,20 +190,27 @@ def read_originial_content(old2new_mid_mp):
     return midwithcontent
 
 def read_user_ids():
-    with open("/remote-home/share/dmb_nas/wangzejian/Aminer/TAN-weibo/train.data", 'rb') as file:
+    with open("/root/pyHeter-GAT/weibo/train.data", 'rb') as file:
         train_data_dict = pickle.load(file)
 
-    with open("/remote-home/share/dmb_nas/wangzejian/Aminer/TAN-weibo/valid.data", 'rb') as file:
+    with open("/root/pyHeter-GAT/weibo/valid.data", 'rb') as file:
         valid_data_dict = pickle.load(file)
 
-    with open("/remote-home/share/dmb_nas/wangzejian/Aminer/TAN-weibo/test.data", 'rb') as file:
+    with open("/root/pyHeter-GAT/weibo/test.data", 'rb') as file:
         test_data_dict = pickle.load(file)
 
     dict_keys = set(train_data_dict.keys()) | set(valid_data_dict.keys()) | set(test_data_dict)
     dict_keys = [int(elem) for elem in dict_keys]
-    us = set([value['seq'] for value in train_data_dict.values()]) & set([value['seq'] for value in valid_data_dict.values()]) & set([value['seq'] for value in test_data_dict.values()])
-    
-    save_pickle(us, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/user_ids.pkl")
+    us = set()
+    for elem in train_data_dict.values():
+        us |= set(elem['seq'])
+    for elem in valid_data_dict.values():
+        us |= set(elem['seq'])
+    for elem in test_data_dict.values():
+        us |= set(elem['seq'])
+    # us = set([value['seq'] for value in train_data_dict.values()]) & set([value['seq'] for value in valid_data_dict.values()]) & set([value['seq'] for value in test_data_dict.values()])
+
+    # save_pickle(us, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/user_ids.pkl")
     logger.info(f"keys={len(dict_keys)}, user-size={len(us)}")
     return us
 

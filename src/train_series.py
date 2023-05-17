@@ -3,17 +3,18 @@
 # import os
 # sys.path.append(os.path.dirname(os.getcwd()))
 
-from lib.utils import get_sparse_tensor
+# from lib.utils import get_sparse_tensor
 from lib.log import logger
 from utils.utils import *
-from utils.graph import *
+# from utils.graph import *
 from utils.graph_aminer import *
-from utils.tweet_clustering import tweet_centralized_process
+# from utils.tweet_clustering import tweet_centralized_process
 from utils.metric import compute_metrics
 from utils.Constants import PAD, EOS
 from utils.Optim import ScheduledOptim
 from src.data_loader import DataConstruct
-from src.model import DenseSparseGAT, HeterEdgeSparseGAT
+# from src.model import DenseSparseGAT, HeterEdgeSparseGAT
+from src.model_pyg import *
 import numpy as np
 import argparse
 import shutil
@@ -23,12 +24,13 @@ import torch.optim as optim
 import torch.nn.functional as F
 from itertools import chain
 from torch_geometric.data import Data
-from sklearn import preprocessing
-from sklearn.decomposition import PCA
-from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
+# from sklearn import preprocessing
+# from sklearn.decomposition import PCA
+# from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
-logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
+# logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
 
 parser = argparse.ArgumentParser()
 # >> Constant
@@ -81,29 +83,30 @@ def get_cascade_criterion(user_size):
     weight = torch.ones(user_size)
     weight[PAD] = 0
     weight[EOS] = 0
-    return torch.nn.CrossEntropyLoss(weight, size_average=False)
+    return torch.nn.CrossEntropyLoss(weight)
 
 def get_performance(criterion, pred_cascade, gold_cascade):
     '''
     pred_cascade: (#samples, #user_size), gold_cascade: (#samples,)
     '''
-    pred_cascade = pred_cascade.max(1)[1]
     gold_cascade = gold_cascade.contiguous().view(-1)
+    pred_cascade = pred_cascade.view(gold_cascade.size(0), -1)
     loss = criterion(pred_cascade, gold_cascade)
 
+    pred_cascade = pred_cascade.max(1)[1]
     n_correct = pred_cascade.data.eq(gold_cascade.data)
     n_correct = n_correct.masked_select(gold_cascade.ne(PAD).data).sum().float()
     # n_correct = n_correct.masked_select((gold_cascade.ne(PAD)*gold_cascade.ne(EOS)).data).sum().float()
     return loss, n_correct
 
-def get_scores(pred_cascade, gold_cascade, k_list=[10,50,100]):
+def get_scores(pred_cascade:torch.Tensor, gold_cascade:torch.Tensor, k_list=[10,50,100]):
     # pred_cascade = pred_cascade.max(1)[0].detach().cpu().numpy()
     pred_cascade = pred_cascade.detach().cpu().numpy()
     gold_cascade = gold_cascade.contiguous().view(-1).detach().cpu().numpy()
     scores = compute_metrics(pred_cascade, gold_cascade, k_list)
     return scores
 
-def train(epoch_i, batch_data, model, optimizer, loss_func, writer, log_desc='train_'):
+def train(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, log_desc='train_'):
     model.train()
 
     loss, correct, total = 0., 0., 0.
@@ -113,12 +116,15 @@ def train(epoch_i, batch_data, model, optimizer, loss_func, writer, log_desc='tr
         # if args.cuda:
         #     labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
 
-        cascade_users, cascade_tss, cascade_intervals, cascade_contents = (item.to(args.gpu) for item in batch)
+        cascade_users, cascade_tss, cascade_intervals, cascade_contents = batch
         gold_cascade = cascade_users[:, 1:]
+        if args.cuda:
+            cascade_users = cascade_users.to(args.gpu)
+            cascade_intervals = cascade_intervals.to(args.gpu)
 
         optimizer.zero_grad()
         if args.model == 'densegat':
-            pred_cascade = model(adj, static_emb, dynamic_embs)
+            pred_cascade = model(cascade_users, cascade_intervals, graph)
         # elif args.model == 'heteredgegat':
         #     if not args.use_random_multiedge:
         #         hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
@@ -146,7 +152,7 @@ def train(epoch_i, batch_data, model, optimizer, loss_func, writer, log_desc='tr
     writer.add_scalar(log_desc+'loss', loss/total, epoch_i+1)
     writer.add_scalar(log_desc+'acc',  n_correct/total, epoch_i+1)
 
-def evaluate(epoch_i, batch_data, model, optimizer, loss_func, writer, k_list=[10,50,100], log_desc='valid_'):
+def evaluate(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, k_list=[10,50,100], log_desc='valid_'):
     model.eval()
 
     loss, correct, total = 0., 0., 0.
@@ -169,7 +175,7 @@ def evaluate(epoch_i, batch_data, model, optimizer, loss_func, writer, k_list=[1
         #     labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
         
         if args.model == 'densegat':
-            pred_cascade = model(adj, static_emb, dynamic_embs)
+            pred_cascade = model(cascade_users, cascade_intervals, graph)
         # elif args.model == 'heteredgegat':
         #     if not args.use_random_multiedge:
         #         hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
@@ -212,30 +218,35 @@ def evaluate(epoch_i, batch_data, model, optimizer, loss_func, writer, k_list=[1
 def main():
     # torch.set_num_threads(4)
 
-    user_ids = read_user_ids()
-    edges = get_static_subnetwork(user_ids)
+    # user_ids = read_user_ids()
+    # user_ids = load_pickle("/root/pyHeter-GAT/weibo/user_ids.pkl")
+    # edges = get_static_subnetwork(user_ids)
+    edges = load_pickle("/root/pyHeter-GAT/weibo/edges.pkl")
     edges = list(zip(*edges))
-    edges_t = torch.LongTensor(edges).t()
-    weight_t = torch.FloatTensor([1]*len(edges))
+    edges_t = torch.LongTensor(edges) # (2,#num_edges)
+    weight_t = torch.FloatTensor([1]*edges_t.size(0))
     graph = Data(edge_index=edges_t, edge_weight=weight_t)
 
-    train_data = DataConstruct(dataset_dirpath="", batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=0, load_dict=True)
-    valid_data = DataConstruct(dataset_dirpath="", batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=1, load_dict=False)
-    test_data  = DataConstruct(dataset_dirpath="", batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=2, load_dict=False)
+    dataset_dirpath = "/root/pyHeter-GAT/weibo"
+    train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=0, load_dict=False)
+    valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=1, load_dict=True)
+    test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=2, load_dict=True)
 
-    loss_func = torch.nn.CrossEntropyLoss(size_average=False, ignore_index=PAD)
+    model = BasicGATNetwork(n_feat=64, n_units=[16,16], n_heads=[4,4], num_interval=args.n_interval, shape_ret=(16,train_data.user_size), attn_dropout=0.0, dropout=0.3)
+
+    loss_func = torch.nn.CrossEntropyLoss(ignore_index=PAD)
     # loss_func = get_cascade_criterion(train_data.user_size)
 
     # optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     optimizer = ScheduledOptim(
-        optim.Adagrad(model.parameters(), betas=(0.9, 0.98), eps=1e-09), 
+        optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09), 
         args.d_model, args.n_warmup_steps,)
     
     if args.cuda:
-        # model = model.to(args.gpu)
+        model = model.to(args.gpu)
         loss_func = loss_func.to(args.gpu)
     
-    tensorboard_log_dir = 'tensorboard/tensorboard_%s_stage%d_epochs%d_lr%f_t%d' % (args.tensorboard_log, args.stage, args.epochs, args.lr, args.tweet_per_user)
+    tensorboard_log_dir = 'tensorboard/tensorboard_%s_epochs%d' % (args.tensorboard_log, args.epochs)
     os.makedirs(tensorboard_log_dir, exist_ok=True)
     shutil.rmtree(tensorboard_log_dir)
     writer = SummaryWriter(tensorboard_log_dir)
@@ -245,19 +256,19 @@ def main():
     logger.info("training...")
     for epoch_i in range(args.epochs):
         start = time.time()
-        train_loss, train_acc = train(epoch_i, train_data, model, optimizer, loss_func, writer)
+        train_loss, train_acc = train(epoch_i, train_data, graph, model, optimizer, loss_func, writer)
         logger.info('   - (Training)    loss: {loss: 8.5f}, accuracy: {accu:3.3f} %, elapse: {elapse:3.3f} min'.format(
             loss=train_loss, accu=100*train_acc, elapse=(time.time()-start)/60))
         
         if (epoch_i + 1) % args.check_point == 0:
             logger.info("epoch %d, checkpoint!", epoch_i)
             start = time.time()
-            scores = evaluate(epoch_i, valid_data, model, optimizer, loss_func, writer)
+            scores = evaluate(epoch_i, valid_data, graph, model, optimizer, loss_func, writer)
             logger.info('   - (Validating)    scores: {scores}, elapse: {elapse:3.3f} min'.format(
                 scores="/".join([f"{key}-{value}" for key,value in scores.items()]),
                 elapse=(time.time()-start)/60))
             
-            scores = evaluate(epoch_i, test_data, model, optimizer, loss_func, writer)
+            scores = evaluate(epoch_i, test_data, graph, model, optimizer, loss_func, writer)
             logger.info('   - (Testing)    scores: {scores}'.format(
                 scores="/".join([f"{key}-{value}" for key,value in scores.items()]),))
             save_model(epoch_i, args, model, optimizer)

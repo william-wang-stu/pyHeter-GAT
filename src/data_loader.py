@@ -13,17 +13,18 @@ from __future__ import print_function
 from lib.log import logger
 from utils.utils import load_w2v_feature, load_pickle
 from utils.Constants import PAD_WORD, EOS_WORD, PAD, EOS
+from utils.graph_aminer import read_user_ids
 from torch.utils.data import Dataset
 from torch.utils.data.sampler import Sampler
-from sklearn import preprocessing
+# from sklearn import preprocessing
 import numpy as np
 import os
 import random
 import pickle
 import torch
 import sklearn
-import itertools
-import igraph
+# import itertools
+# import igraph
 
 class ChunkSampler(Sampler):
     """
@@ -117,8 +118,8 @@ class DataConstruct(object):
         self.shuffle = shuffle
         self.append_EOS = append_EOS
 
-        u2idx_filepath, idx2u_filepath = f"{dataset_dirpath}/u2idx.pickle", f"{dataset_dirpath}/idx2u.pickle"
-        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/cascade.txt", f"{dataset_dirpath}/cascadevalid.txt", f"{dataset_dirpath}/cascadetest.txt"
+        u2idx_filepath, idx2u_filepath = f"{dataset_dirpath}/u2idx.data", f"{dataset_dirpath}/idx2u.data"
+        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train.data", f"{dataset_dirpath}/valid.data", f"{dataset_dirpath}/test.data"
         if not load_dict:
             self._u2idx = {}
             self._idx2u = []
@@ -135,9 +136,9 @@ class DataConstruct(object):
             self.user_size = len(self._u2idx)
             logger.info(f"User Size={self.user_size}")
         
-        self._train_data, _train_data_len = self._readCascadeFromFile(train_data_filepath, min_user=2, max_user=500)
-        self._valid_data, _valid_data_len = self._readCascadeFromFile(valid_data_filepath, min_user=2, max_user=500)
-        self._test_data,  _test_data_len  = self._readCascadeFromFile(test_data_filepath,  min_user=2, max_user=500)
+        self._train_data, _train_data_len = self._readCascadeFromFile2(train_data_filepath, min_user=2, max_user=500)
+        self._valid_data, _valid_data_len = self._readCascadeFromFile2(valid_data_filepath, min_user=2, max_user=500)
+        self._test_data,  _test_data_len  = self._readCascadeFromFile2(test_data_filepath,  min_user=2, max_user=500)
         if self.shuffle:
             random.seed(self.seed)
             random.shuffle(self._train_data)
@@ -153,21 +154,22 @@ class DataConstruct(object):
     
     def _buildIndex(self, train_data_filepath, valid_data_filepath, test_data_filepath):
         # compute an index of the users that appear at least once in the training and testing cascades.
-        def read_user_set(data_filepath):
-            user_set = set()
-            for line in open(data_filepath):
-                if len(line.strip()) == 0:
-                    continue
-                chunks = line.strip().split()
-                for chunk in chunks:
-                    user, timestamp = chunk.split(',')
-                    user_set.add(user)
-            return user_set
+        # def read_user_set(data_filepath):
+        #     user_set = set()
+        #     for line in open(data_filepath):
+        #         if len(line.strip()) == 0:
+        #             continue
+        #         chunks = line.strip().split()
+        #         for chunk in chunks:
+        #             user, timestamp = chunk.split(',')
+        #             user_set.add(user)
+        #     return user_set
         
-        train_user_set = read_user_set(train_data_filepath)
-        valid_user_set = read_user_set(valid_data_filepath)
-        test_user_set  = read_user_set(test_data_filepath)
-        user_set = train_user_set | valid_user_set | test_user_set
+        # train_user_set = read_user_set(train_data_filepath)
+        # valid_user_set = read_user_set(valid_data_filepath)
+        # test_user_set  = read_user_set(test_data_filepath)
+        # user_set = train_user_set | valid_user_set | test_user_set
+        user_set = read_user_ids()
 
         pos = 0
         self._u2idx[PAD_WORD] = pos
@@ -214,19 +216,23 @@ class DataConstruct(object):
 
     def _readCascadeFromFile2(self, filename, min_user=2, max_user=500):
         """read all cascade from training or testing files. """
-        interval = self.tmax / self.num_interval
+        per_interval = self.tmax / self.num_interval
 
         total_len = 0
         cascade_data = []
         data_dict = load_pickle(filename)
         for tag, cascades in data_dict.items():
-            userlist = [self._u2idx[elem] for elem in cascades['user']]
-            tslist = cascades['ts']
-            intervallist = np.ceil((tslist[-1]-tslist)/interval)
+            # userlist = [self._u2idx[elem] for elem in cascades['user']]
+            userlist = [self._u2idx[elem] for elem in cascades['seq']]
+            # tslist = cascades['ts']
+            tslist = list(cascades['interval'])
+            # intervallist = np.ceil((tslist[-1]-tslist)/interval)
+            intervallist = list(np.ceil((tslist[-1]-np.array(tslist))/(per_interval*3600)))
             for idx, interval in enumerate(intervallist):
-                if interval > self.num_interval:
-                    intervallist[idx] = self.num_interval
-            contentlist = cascades['content']
+                if interval >= self.num_interval:
+                    intervallist[idx] = self.num_interval-1
+            # contentlist = cascades['content']
+            contentlist = list(cascades['pre'])
             # wordlist = cascades['word']
 
             if len(userlist) >= min_user and len(userlist) <= max_user:
@@ -282,13 +288,15 @@ class DataConstruct(object):
             cascade_intervals = np.array([
                 inst['interval'] + [0] * (max_len - len(inst['interval']))
                 for inst in insts])
-            cascade_contents = np.array([inst['content'] for inst in insts])
+            # cascade_contents = np.array([
+            #     inst['content'] + [PAD_WORD] * (max_len - len(inst['content']))
+            #     for inst in insts])
 
             cascade_users_tensor = torch.LongTensor(cascade_users)
             cascade_tss_tensor = torch.LongTensor(cascade_tss)
             cascade_intervals_tensor = torch.LongTensor(cascade_intervals)
-            cascade_contents_tensor = torch.LongTensor(cascade_contents)
-            return cascade_users_tensor, cascade_tss_tensor, cascade_intervals_tensor, cascade_contents_tensor
+            # cascade_contents_tensor = torch.LongTensor(cascade_contents)
+            return cascade_users_tensor, cascade_tss_tensor, cascade_intervals_tensor, None
 
         if self._iter_count < self.num_batch:
             batch_idx = self._iter_count
@@ -302,8 +310,8 @@ class DataConstruct(object):
             elif self.data_type == 2:
                 seq_insts = self._test_data[start_idx:end_idx]
                         
-            seq_users, seq_tss = pad_to_longest(seq_insts)
-            return seq_users, seq_tss
+            # seq_users, seq_tss = pad_to_longest(seq_insts)
+            # return seq_users, seq_tss
             seq_users, seq_tss, seq_intervals, seq_contents = pad_to_longest2(seq_insts)
             return seq_users, seq_tss, seq_intervals, seq_contents
         else:
