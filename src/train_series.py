@@ -93,7 +93,6 @@ def get_performance(criterion, pred_cascade, gold_cascade):
     return loss, n_correct
 
 def get_scores(pred_cascade:torch.Tensor, gold_cascade:torch.Tensor, k_list=[10,50,100]):
-    # pred_cascade = pred_cascade.max(1)[0].detach().cpu().numpy()
     pred_cascade = pred_cascade.detach().cpu().numpy()
     gold_cascade = gold_cascade.contiguous().view(-1).detach().cpu().numpy()
     scores = compute_metrics(pred_cascade, gold_cascade, k_list)
@@ -220,10 +219,13 @@ def main():
     n_units = [int(x) for x in args.hidden_units.strip().split(",")]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
     # TODO: decide on n_feat
-    model = BasicGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), attn_dropout=args.attn_dropout, dropout=args.dropout)
-
-    # loss_func = torch.nn.CrossEntropyLoss(ignore_index=PAD)
-    loss_func = get_cascade_criterion(train_data.user_size)
+    if args.model == 'densegat':
+        model = BasicGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), attn_dropout=args.attn_dropout, dropout=args.dropout)
+    elif args.model == 'heteredgegat':
+        model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=args.n_component, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), attn_dropout=args.attn_dropout, dropout=args.dropout)
+    
+    loss_func = torch.nn.CrossEntropyLoss(ignore_index=PAD)
+    # loss_func = get_cascade_criterion(train_data.user_size)
 
     optimizer = ScheduledOptim(
         optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09), 
@@ -244,7 +246,7 @@ def main():
     for epoch_i in range(args.epochs):
         start = time.time()
         train_loss, train_acc = train(epoch_i, train_data, graph, model, optimizer, loss_func, writer)
-        logger.info('   - (Training)    loss: {loss: 8.5f}, accuracy: {accu:3.3f} %, elapse: {elapse:3.3f} min, gpu memory usage: {mem:3.3f} MiB'.format(
+        logger.info('   - (Training)    loss: {loss:8.5f}, accuracy: {accu:3.3f} %, elapse: {elapse:3.3f} min, gpu memory usage: {mem:3.3f} MiB'.format(
             loss=train_loss, accu=100*train_acc, elapse=(time.time()-start)/60, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
         
         if (epoch_i + 1) % args.check_point == 0:

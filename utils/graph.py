@@ -550,7 +550,7 @@ def build_heteredge_mats(timelines:dict, preprocess_timelines_keys:list, labels_
         tag2simedges_unbalanced[tag] = simedges
     
     # 3. Build Class2SimEdges Mp & Tag2Classid Mp
-    tagid2classids = find_prominent_components_foreach_tag(tag2simedges_unbalanced, n_component=3)
+    tagid2classids = find_prominent_components_foreach_tag(tag2simedges_unbalanced, n_component=n_component)
     classid2tagids = {}
     for tag, classids in tagid2classids.items():
         for class_id in classids:

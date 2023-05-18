@@ -37,3 +37,5 @@ with open("/remote-home/share/dmb_nas/wangzejian/Aminer/TAN-weibo/test.data", 'r
 
 test_data_dict_withcontent = select_and_merge_cascades(test_data_dict.keys(), shorten_cascades_withcontent, midcontent, wordtable)
 save_pickle(test_data_dict_withcontent, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/test_withcontent.pkl")
+
+# bertopic-preprocess/{llm-normtext, llm-topic, llm-tag}.py

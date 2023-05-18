@@ -158,3 +158,64 @@ class BasicGATNetwork(nn.Module):
         mask = get_previous_user_mask(cas_uids, self.user_size)
         output = output + mask
         return output
+
+class HeterEdgeGATNetwork(nn.Module):
+    def __init__(self, n_feat, n_adj, n_units, n_heads, num_interval, shape_ret,
+        attn_dropout, dropout, instance_normalization=False,
+    ):
+        """
+        shape_ret: (n_units[-1], #user)
+        """
+        super(BasicGATNetwork, self).__init__()
+
+        self.dropout = dropout
+        self.inst_norm = instance_normalization
+        # if self.inst_norm:
+        #     for i, dynamic_nfeat in enumerate(dynamic_nfeats):
+        #         norm = nn.InstanceNorm1d(dynamic_nfeat, momentum=0.0, affine=True)
+        #         setattr(self, f"norm-{i}", norm)
+        self.user_size = shape_ret[1]
+        self.user_emb = nn.Embedding(self.user_size, n_feat, padding_idx=PAD)
+        self.heter_gat_network = nn.ModuleList([
+            GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout)
+            for _ in range(n_adj)])
+        self.additive_attention = AdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
+        self.time_attention = TimeAttention_New(num_interval=num_interval, in_features1=n_units[0])
+        self.fc_network = nn.Linear(shape_ret[0]*(n_adj+1), shape_ret[1])
+        self.init_weights()
+    
+    def init_weights(self):
+        init.xavier_normal_(self.fc_network.weight)
+    
+    def forward(self, cas_uids, cas_intervals, graph):
+    # def forward(self, cas_uids, cas_intervals, graph, static_emb:torch.Tensor, dynamic_embs:List[torch.Tensor]):
+        # norm_embs = []
+        # for i, dynamic_emb in enumerate(dynamic_embs):
+        #     norm_emb = dynamic_emb
+        #     if self.inst_norm:
+        #         norm = getattr(self, f"norm-{i}")
+        #         norm_emb = norm(norm_emb.transpose(0,1)).transpose(0,1)
+        #     norm_embs.append(norm_emb)
+        # emb = torch.cat(norm_embs, dim=1)
+        # emb = torch.cat((emb,static_emb),dim=1)
+        cas_uids = cas_uids[:,:-1]
+        cas_intervals = cas_intervals[:,:-1]
+
+        user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]))
+        heter_user_embs = []
+        for heter_i, gat_network in enumerate(self.heter_gat_network):
+            graph_emb = gat_network(graph, user_emb)
+            heter_user_embs.append(graph_emb.unsqueeze(1)) # (Nu, 1,    D')
+        type_aware_emb = torch.cat(heter_user_embs, dim=1) # (Nu, |Rs|, D')
+        type_fusion_emb = self.additive_attention(user_emb, type_aware_emb) # (Nu, 1, D')
+        # TODO: how to aggregate from different adjs
+        seq_embs = F.embedding(cas_uids, type_fusion_emb)
+
+        mask = (cas_uids == PAD)
+        seq_embs = self.time_attention(cas_intervals, seq_embs, mask)
+        seq_embs = F.dropout(seq_embs, self.dropout)
+
+        output = self.fc_network(seq_embs)
+        mask = get_previous_user_mask(cas_uids, self.user_size)
+        output = output + mask
+        return output
