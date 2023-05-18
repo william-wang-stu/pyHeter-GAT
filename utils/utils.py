@@ -21,11 +21,11 @@ from sklearn.decomposition import PCA
 # from numba import types
 # from numba.typed import Dict, List
 
-# config = configparser.ConfigParser()
-# # NOTE: realpath(__file__)是在获取执行这段代码所属文件的绝对路径, 即~/pyHeter-GAT/src/config.ini
-# config.read(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'src/config.ini'))
-# DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
-# Ntimestage = int(config['DEFAULT']['Ntimestage'])
+config = configparser.ConfigParser()
+# NOTE: realpath(__file__)是在获取执行这段代码所属文件的绝对路径, 即~/pyHeter-GAT/src/config.ini
+config.read(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'src/config.ini'))
+DATA_ROOTPATH = config['DEFAULT']['DataRootPath']
+Ntimestage = int(config['DEFAULT']['Ntimestage'])
 
 def save_pickle(obj, filename):
     _, ext = os.path.splitext(filename)

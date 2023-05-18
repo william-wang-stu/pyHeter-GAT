@@ -3,17 +3,13 @@
 # import os
 # sys.path.append(os.path.dirname(os.getcwd()))
 
-# from lib.utils import get_sparse_tensor
 from lib.log import logger
 from utils.utils import *
-# from utils.graph import *
 from utils.graph_aminer import *
-# from utils.tweet_clustering import tweet_centralized_process
 from utils.metric import compute_metrics
 from utils.Constants import PAD, EOS
 from utils.Optim import ScheduledOptim
 from src.data_loader import DataConstruct
-# from src.model import DenseSparseGAT, HeterEdgeSparseGAT
 from src.model_pyg import *
 import numpy as np
 import argparse
@@ -24,13 +20,11 @@ import torch.optim as optim
 import torch.nn.functional as F
 from itertools import chain
 from torch_geometric.data import Data
-# from sklearn import preprocessing
-# from sklearn.decomposition import PCA
 # from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-# logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
+logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
 
 parser = argparse.ArgumentParser()
 # >> Constant
@@ -60,7 +54,7 @@ parser.add_argument('--batch-size', type=int, default=32, help='Number of epochs
 # [default] hetersparsegat: 3e-3, hypergat: 3e-3, densegat: 3e-2
 parser.add_argument('--lr', type=float, default=3e-2, help='Initial learning rate.')
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
-parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
+parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate (1 - keep probability).')
 parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropout rate (1 - keep probability).')
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
@@ -95,8 +89,7 @@ def get_performance(criterion, pred_cascade, gold_cascade):
 
     pred_cascade = pred_cascade.max(1)[1]
     n_correct = pred_cascade.data.eq(gold_cascade.data)
-    n_correct = n_correct.masked_select(gold_cascade.ne(PAD).data).sum().float()
-    # n_correct = n_correct.masked_select((gold_cascade.ne(PAD)*gold_cascade.ne(EOS)).data).sum().float()
+    n_correct = n_correct.masked_select((gold_cascade.ne(PAD)*gold_cascade.ne(EOS)).data).sum().float()
     return loss, n_correct
 
 def get_scores(pred_cascade:torch.Tensor, gold_cascade:torch.Tensor, k_list=[10,50,100]):
@@ -110,11 +103,9 @@ def train(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, log_d
     model.train()
 
     loss, correct, total = 0., 0., 0.
-    for _, batch in enumerate(tqdm(batch_data)):
+    for _, batch in enumerate((batch_data)):
+    # for _, batch in enumerate(tqdm(batch_data)):
         # if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
-        # labels, train_mask, class_weight = labels_mp[hashtag], train_mask_mp[hashtag], class_weight_mp[hashtag]
-        # if args.cuda:
-        #     labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
 
         cascade_users, cascade_tss, cascade_intervals, cascade_contents = batch
         gold_cascade = cascade_users[:, 1:]
@@ -134,23 +125,19 @@ def train(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, log_d
         #         hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
         #         # hedge_adjs = [adj] * (args.n_component+1)
         #     output = model(hedge_adjs, static_emb, dynamic_embs)
-        # loss_train = F.nll_loss(output[train_mask], labels[train_mask], class_weight)
-        # alpha = train_mask.sum().item()
-        # loss  += alpha * loss_train.item()
-        # total += alpha
         loss_batch, n_correct = get_performance(loss_func, pred_cascade, gold_cascade)
         loss_batch.backward()
         optimizer.step()
         optimizer.update_learning_rate()
 
-        n_words = gold_cascade.ne(PAD).data.sum().float()
-        # n_words = (gold_cascade.ne(PAD)*(gold_cascade.ne(EOS))).data.sum().float()
+        n_words = (gold_cascade.ne(PAD)*(gold_cascade.ne(EOS))).data.sum().float()
         loss += loss_batch.item()
         correct += n_correct.item()
         total += n_words
-    logger.info(f"epoch {epoch_i} loss={loss/total}, acc={n_correct/total}, GPU Memory Usage={check_gpu_memory_usage(int(args.gpu[-1]))} MiB")
     writer.add_scalar(log_desc+'loss', loss/total, epoch_i+1)
     writer.add_scalar(log_desc+'acc',  n_correct/total, epoch_i+1)
+
+    return loss/total, n_correct/total
 
 def evaluate(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, k_list=[10,50,100], log_desc='valid_'):
     model.eval()
@@ -160,19 +147,15 @@ def evaluate(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, k_
     for k in k_list:
         scores[f'hits@{k}'] = 0
         scores[f'map@{k}'] = 0
-    # loss, correct, total, prec, rec, f1 = 0., 0., 0., 0., 0., 0.
-    # y_true, y_pred, y_score, series_y_true, series_y_prob = [], [], [], [], []
-    for _, batch in enumerate(tqdm(batch_data)):
+    for _, batch in enumerate((batch_data)):
+    # for _, batch in enumerate(tqdm(batch_data)):
         # if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
-        # cascade_users = [elem[0] for elem in preprocess_timelines[hashtag]]
 
-        cascade_users, cascade_tss, cascade_intervals, cascade_contents = (item.to(args.gpu) for item in batch)
+        cascade_users, cascade_tss, cascade_intervals, cascade_contents = batch
         gold_cascade = cascade_users[:, 1:]
-
-        # labels, train_mask, val_mask, test_mask, class_weight = labels_mp[hashtag], train_mask_mp[hashtag], val_mask_mp[hashtag], test_mask_mp[hashtag], class_weight_mp[hashtag]
-        # mask = train_mask + val_mask + test_mask
-        # if args.cuda:
-        #     labels = labels.to(args.gpu); class_weight = class_weight.to(args.gpu)
+        if args.cuda:
+            cascade_users = cascade_users.to(args.gpu)
+            cascade_intervals = cascade_intervals.to(args.gpu)
         
         if args.model == 'densegat':
             pred_cascade = model(cascade_users, cascade_intervals, graph)
@@ -187,12 +170,13 @@ def evaluate(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, k_
         #     output = model(hedge_adjs, static_emb, dynamic_embs)
         
         loss_batch, n_correct = get_performance(loss_func, pred_cascade, gold_cascade)
-        n_words = gold_cascade.ne(PAD).data.sum().float()
-        # n_words = (gold_cascade.ne(PAD)*(gold_cascade.ne(EOS))).data.sum().float()
+        n_words = (gold_cascade.ne(PAD)*(gold_cascade.ne(EOS))).data.sum().float()
         loss += loss_batch.item()
         correct += n_correct.item()
         total += n_words
 
+        gold_cascade = gold_cascade.contiguous().view(-1)           # (#samples,)
+        pred_cascade = pred_cascade.view(gold_cascade.size(0), -1)  # (#samples, #user_size)
         scores_batch = get_scores(pred_cascade, gold_cascade, k_list)
         scores['MRR'] += scores_batch['MRR'] * n_words
         for k in k_list:
@@ -205,15 +189,16 @@ def evaluate(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, k_
     for k in k_list:
         scores[f'hits@{k}'] /= total
         scores[f'map@{k}'] /= total
-    logger.info(f"MRR={scores['MRR']}, hits@10={scores['hits@10']}, map@10={scores['map@10']}, hits@50={scores['hits@50']}, map@100={scores['map@100']}, hits@100={scores['hits@100']}, map@100={scores['map@100']},")
+    # logger.info(f"MRR={scores['MRR']}, hits@10={scores['hits@10']}, map@10={scores['map@10']}, hits@50={scores['hits@50']}, map@100={scores['map@100']}, hits@100={scores['hits@100']}, map@100={scores['map@100']},")
     
-    # tensorboard_logger.log_value(log_desc+'loss', loss / total, epoch+1)
     writer.add_scalar(log_desc+'loss', loss/total, epoch_i+1); writer.add_scalar(log_desc+'acc', correct/total, epoch_i+1); writer.add_scalar(log_desc+'mrr', scores['MRR'], epoch_i+1)
-    writer.add_scalar(log_desc+'hits@10', scores['hits@10'], epoch_i+1);  writer.add_scalar(log_desc+'map@10', scores['map@10'], epoch_i+1)
-    writer.add_scalar(log_desc+'hits@50', scores['hits@50'], epoch_i+1);  writer.add_scalar(log_desc+'map@50', scores['map@50'], epoch_i+1)
-    writer.add_scalar(log_desc+'hits@100', scores['hits@100'], epoch_i+1);writer.add_scalar(log_desc+'map@100', scores['map@100'], epoch_i+1)
+    writer.add_scalar(log_desc+'hits@10',  scores['hits@10'],  epoch_i+1);   writer.add_scalar(log_desc+'map@10',  scores['map@10'],  epoch_i+1)
+    writer.add_scalar(log_desc+'hits@50',  scores['hits@50'],  epoch_i+1);   writer.add_scalar(log_desc+'map@50',  scores['map@50'],  epoch_i+1)
+    writer.add_scalar(log_desc+'hits@100', scores['hits@100'], epoch_i+1);  writer.add_scalar(log_desc+'map@100', scores['map@100'], epoch_i+1)
     # writer.add_scalar(log_desc+'auc', auc, epoch_i+1);                    writer.add_scalar(log_desc+'f1', f1, epoch_i+1)
     # writer.add_scalar(log_desc+'prec', prec, epoch_i+1);                  writer.add_scalar(log_desc+'rec', rec, epoch_i+1)
+    
+    return scores
 
 def main():
     # torch.set_num_threads(4)
@@ -221,23 +206,25 @@ def main():
     # user_ids = read_user_ids()
     # user_ids = load_pickle("/root/pyHeter-GAT/weibo/user_ids.pkl")
     # edges = get_static_subnetwork(user_ids)
-    edges = load_pickle("/root/pyHeter-GAT/weibo/edges.pkl")
+    edges = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.data"))
     edges = list(zip(*edges))
     edges_t = torch.LongTensor(edges) # (2,#num_edges)
-    weight_t = torch.FloatTensor([1]*edges_t.size(0))
+    weight_t = torch.FloatTensor([1]*edges_t.size(1))
     graph = Data(edge_index=edges_t, edge_weight=weight_t)
 
-    dataset_dirpath = "/root/pyHeter-GAT/weibo"
+    dataset_dirpath = f"{DATA_ROOTPATH}/Weibo-Aminer"
     train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=0, load_dict=False)
     valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=1, load_dict=True)
     test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=2, load_dict=True)
 
-    model = BasicGATNetwork(n_feat=64, n_units=[16,16], n_heads=[4,4], num_interval=args.n_interval, shape_ret=(16,train_data.user_size), attn_dropout=0.0, dropout=0.3)
+    n_units = [int(x) for x in args.hidden_units.strip().split(",")]
+    n_heads = [int(x) for x in args.heads.strip().split(",")]
+    # TODO: decide on n_feat
+    model = BasicGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), attn_dropout=args.attn_dropout, dropout=args.dropout)
 
-    loss_func = torch.nn.CrossEntropyLoss(ignore_index=PAD)
-    # loss_func = get_cascade_criterion(train_data.user_size)
+    # loss_func = torch.nn.CrossEntropyLoss(ignore_index=PAD)
+    loss_func = get_cascade_criterion(train_data.user_size)
 
-    # optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     optimizer = ScheduledOptim(
         optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09), 
         args.d_model, args.n_warmup_steps,)
@@ -257,21 +244,22 @@ def main():
     for epoch_i in range(args.epochs):
         start = time.time()
         train_loss, train_acc = train(epoch_i, train_data, graph, model, optimizer, loss_func, writer)
-        logger.info('   - (Training)    loss: {loss: 8.5f}, accuracy: {accu:3.3f} %, elapse: {elapse:3.3f} min'.format(
-            loss=train_loss, accu=100*train_acc, elapse=(time.time()-start)/60))
+        logger.info('   - (Training)    loss: {loss: 8.5f}, accuracy: {accu:3.3f} %, elapse: {elapse:3.3f} min, gpu memory usage: {mem:3.3f} MiB'.format(
+            loss=train_loss, accu=100*train_acc, elapse=(time.time()-start)/60, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
         
         if (epoch_i + 1) % args.check_point == 0:
             logger.info("epoch %d, checkpoint!", epoch_i)
             start = time.time()
             scores = evaluate(epoch_i, valid_data, graph, model, optimizer, loss_func, writer)
-            logger.info('   - (Validating)    scores: {scores}, elapse: {elapse:3.3f} min'.format(
+            logger.info('   - (Validating)    scores: {scores}, elapse: {elapse:3.3f} min, gpu memory usage: {mem:3.3f} MiB'.format(
                 scores="/".join([f"{key}-{value}" for key,value in scores.items()]),
-                elapse=(time.time()-start)/60))
+                elapse=(time.time()-start)/60, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
             
             scores = evaluate(epoch_i, test_data, graph, model, optimizer, loss_func, writer)
-            logger.info('   - (Testing)    scores: {scores}'.format(
-                scores="/".join([f"{key}-{value}" for key,value in scores.items()]),))
+            logger.info('   - (Testing)    scores: {scores}, gpu memory usage={mem:3.3f} MiB'.format(
+                scores="/".join([f"{key}-{value}" for key,value in scores.items()]), mem=check_gpu_memory_usage(int(args.gpu[-1]))))
             save_model(epoch_i, args, model, optimizer)
     logger.info("Total Elapse: {elapse:3.3f} min".format(elapse=(time.time()-t_total)/60))
 
-main()
+if __name__ == '__main__':
+    main()

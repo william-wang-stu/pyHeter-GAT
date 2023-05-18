@@ -4,7 +4,7 @@ from utils.utils import *
 
 def read_static_network():
     # Weibo Network: Static Following Network
-    weibo_network_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/weibo_network.txt"
+    weibo_network_filepath = os.path.join(DATA_ROOTPATH, "Weibo-Aminer/weibo_network.txt")
 
     edges = []
     with open(weibo_network_filepath, 'r') as f:
@@ -26,8 +26,7 @@ def read_static_network():
 
 def get_static_subnetwork(user_ids:set):
     # Weibo Network: Static Following Network
-    # weibo_network_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/weibo_network.txt"
-    weibo_network_filepath = "/root/pyHeter-GAT/weibo/weibo_network.txt"
+    weibo_network_filepath = os.path.join(DATA_ROOTPATH, "Weibo-Aminer/weibo_network.txt")
 
     edges = []
     with open(weibo_network_filepath, 'r') as f:
@@ -50,7 +49,7 @@ def get_static_subnetwork(user_ids:set):
                         edges.append((uid2,uid1))
     
     # save_pickle(edges, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/edgelist_subgraph.pkl")
-    save_pickle(edges, "/root/pyHeter-GAT/weibo/edges.pkl")
+    save_pickle(edges, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.pkl"))
     logger.info(len(edges))
     return edges
 
@@ -68,7 +67,7 @@ def reindex_edges(nodes, edges):
 def read_uid_mid_mp():
     new2old_uid_mp = {}
     old2new_uid_mp = {}
-    with open("/remote-home/share/dmb_nas/wangzejian/Aminer/uidlist.txt", 'r') as f:
+    with open(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/uidlist.txt"), 'r') as f:
         for idx, line in enumerate(f):
             new2old_uid_mp[idx] = int(line)
             old2new_uid_mp[int(line)] = idx
@@ -76,7 +75,7 @@ def read_uid_mid_mp():
 
     new2old_mid_mp = {}
     old2new_mid_mp = {}
-    with open("/remote-home/share/dmb_nas/wangzejian/Aminer/diffusion/repost_idlist.txt", 'r') as f:
+    with open(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion/repost_idlist.txt"), 'r') as f:
         for idx, line in enumerate(f):
             new2old_mid_mp[idx] = int(line)
             old2new_mid_mp[int(line)] = idx
@@ -85,8 +84,8 @@ def read_uid_mid_mp():
     return old2new_uid_mp, old2new_mid_mp
 
 def read_diffusion_nocontent():
-    diffusion_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/diffusion/repost_data.txt"
-    # diffusion_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/diffusion/repost_data_sample.txt"
+    diffusion_filepath = os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion/repost_data.txt")
+    # diffusion_filepath = os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion/repost_data_sample.txt")
 
     diffusion = {}
     with open(diffusion_filepath, 'r') as f:
@@ -103,12 +102,12 @@ def read_diffusion_nocontent():
                 diffusion[mid].append((uid, ts))
                 cnt -= 1
 
-    save_pickle(diffusion, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/diffusion_withoutcontent_newids.pkl")
+    save_pickle(diffusion, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/Aminer-pre/diffusion_withoutcontent_newids.pkl"))
     logger.info(len(diffusion))
     return diffusion
 
 def read_diffusion_withcontent(old2new_uid_mp, old2new_mid_mp):
-    retweet_content_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/weibocontents/Retweet_Content.txt"
+    retweet_content_filepath = os.path.join(DATA_ROOTPATH, "Weibo-Aminer/weibocontents/Retweet_Content.txt")
 
     diffusion_withcontent = {}
     with open(retweet_content_filepath, 'r', encoding='gbk') as f:
@@ -150,7 +149,7 @@ def read_diffusion_withcontent(old2new_uid_mp, old2new_mid_mp):
         cascade = sorted(cascade, key=lambda elem:elem['ts'])
         diffusion_withcontent2[key] = cascade
 
-    save_pickle(diffusion_withcontent2, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/diffusion_withcontent.pkl")
+    save_pickle(diffusion_withcontent2, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/Aminer-pre/diffusion_withcontent.pkl"))
     logger.info(len(diffusion_withcontent2))
 
     diffusion_withcontent3 = {}
@@ -163,12 +162,12 @@ def read_diffusion_withcontent(old2new_uid_mp, old2new_mid_mp):
 
         diffusion_withcontent3[old2new_mid_mp[tag]] = cascades_new
 
-    save_pickle(diffusion_withcontent3, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/diffusion_withcontent_newids.pkl")
+    save_pickle(diffusion_withcontent3, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/Aminer-pre/diffusion_withcontent_newids.pkl"))
     logger.info(len(diffusion_withcontent3))
     return diffusion_withcontent3
 
 def read_originial_content(old2new_mid_mp):
-    root_content_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/weibocontents/Root_Content.txt"
+    root_content_filepath = os.path.join(DATA_ROOTPATH, "Weibo-Aminer/weibocontents/Root_Content.txt")
     midwithcontent = {}
     with open(root_content_filepath, 'r', encoding='gbk') as f:
         mid = -1
@@ -185,18 +184,18 @@ def read_originial_content(old2new_mid_mp):
                     midwithcontent[mid] = [int(word) if word != '' else word for word in elems[0].strip().split(' ')]
                     mid = -1
 
-    save_pickle(midwithcontent, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/diffusion_original_content.pkl")
+    save_pickle(midwithcontent, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/Aminer-pre/diffusion_original_content.pkl"))
     logger.info(len(midwithcontent))
     return midwithcontent
 
 def read_user_ids():
-    with open("/root/pyHeter-GAT/weibo/train.data", 'rb') as file:
+    with open(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/train.data"), 'rb') as file:
         train_data_dict = pickle.load(file)
 
-    with open("/root/pyHeter-GAT/weibo/valid.data", 'rb') as file:
+    with open(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/valid.data"), 'rb') as file:
         valid_data_dict = pickle.load(file)
 
-    with open("/root/pyHeter-GAT/weibo/test.data", 'rb') as file:
+    with open(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/test.data"), 'rb') as file:
         test_data_dict = pickle.load(file)
 
     dict_keys = set(train_data_dict.keys()) | set(valid_data_dict.keys()) | set(test_data_dict)
@@ -215,7 +214,7 @@ def read_user_ids():
     return us
 
 def read_wordtable():
-    wordtable_filepath = "/remote-home/share/dmb_nas/wangzejian/Aminer/weibocontents/WordTable.txt"
+    wordtable_filepath = os.path.join(DATA_ROOTPATH, "Weibo-Aminer/weibocontents/WordTable.txt")
     wordtable = {}
     num_words = -1
     with open(wordtable_filepath, 'r', encoding='gbk') as f:
@@ -244,7 +243,7 @@ def get_shorten_cascades_nocontent(diffusion_nocontent, us):
         if len(shorten_cascades) < 4: continue
         shorten_diffusion_nocontent[tag] = shorten_cascades
 
-    save_pickle(shorten_diffusion_nocontent, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/shorten_diffusion_nocontent.pkl")
+    save_pickle(shorten_diffusion_nocontent, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/Aminer-pre/shorten_diffusion_nocontent.pkl"))
     logger.info(len(shorten_diffusion_nocontent))
     return shorten_diffusion_nocontent
 
@@ -264,7 +263,7 @@ def get_shorten_cascades_withcontent(diffusion_withcontent, us):
             elem['content'] = [int(word) if word != '' else word for word in elem['content'][0].strip().split(' ')]
         shorten_cascades_withcontent[tag] = shorten_cascades
 
-    save_pickle(shorten_cascades_withcontent, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/shorten_diffusion_withcontent.pkl")
+    save_pickle(shorten_cascades_withcontent, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/Aminer-pre/shorten_diffusion_withcontent.pkl"))
     logger.info(len(shorten_cascades_withcontent))
     return shorten_cascades_withcontent
 

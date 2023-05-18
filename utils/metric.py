@@ -43,7 +43,10 @@ def MRR(y_prob, y_true):
     n_classes = y_prob.shape[1]
     for p_, y_ in zip(y_prob, y_true):
         ranks += [1 / (n_classes - rankdata(p_, method='max')[y_] + 1)]
-    return sum(ranks)[0] / float(len(ranks))
+    sum_ranks = sum(ranks)
+    if type(sum_ranks) == 'list':
+        sum_ranks = sum_ranks[0]
+    return sum_ranks / float(len(ranks))
 
 def compute_metrics(y_prob, y_true, k_list=[10,50,100]):
     """

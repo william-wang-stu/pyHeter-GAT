@@ -17,19 +17,19 @@ def get_previous_user_mask(seq, user_size):
     seqs = seq.repeat(1,1,seq.size(1)).view(seq.size(0), seq.size(1), seq.size(1))
     previous_mask = np.tril(np.ones(prev_shape)).astype('float32')
     previous_mask = torch.from_numpy(previous_mask)
-    # if seq.is_cuda:
-    #     previous_mask = previous_mask.cuda()
+    if seq.is_cuda:
+        previous_mask = previous_mask.cuda()
     
     masked_seq = previous_mask * seqs.data.float()
 
     # force the 0th dimension (PAD) to be masked
     PAD_tmp = torch.zeros(seq.size(0), seq.size(1), 1)
-    # if seq.is_cuda:
-    #     PAD_tmp = PAD_tmp.cuda()
+    if seq.is_cuda:
+        PAD_tmp = PAD_tmp.cuda()
     masked_seq = torch.cat([masked_seq,PAD_tmp],dim=2)
     ans_tmp = torch.zeros(seq.size(0), seq.size(1), user_size)
-    # if seq.is_cuda:
-    #     ans_tmp = ans_tmp.cuda()
+    if seq.is_cuda:
+        ans_tmp = ans_tmp.cuda()
     masked_seq = ans_tmp.scatter_(2,masked_seq.long(),float('-inf'))
     return masked_seq
 
@@ -55,7 +55,7 @@ class GATNetwork(nn.Module):
             f_in = n_unit*fin_head if fin_head is not None else n_unit
             is_last_layer = layer_i == len(extend_units[:-1])-1
             layer_stack.append(
-                GATv2Conv(heads=n_head, in_channels=f_in, out_channels=f_out, concat=is_last_layer, dropout=attn_dropout, add_self_loops=True,),
+                GATv2Conv(heads=n_head, in_channels=f_in, out_channels=f_out, concat=is_last_layer, dropout=attn_dropout, add_self_loops=True, edge_dim=1),
             )
             if not is_last_layer:
                 # batchnorm_stack.append(nn.LayerNorm(f_out))
@@ -67,8 +67,8 @@ class GATNetwork(nn.Module):
         graph_weight = graph.edge_weight
 
         for layer_i, (gat_layer, batchnorm_layer) in enumerate(zip(self.layer_stack, self.batchnorm_stack)):
-            # emb = gat_layer(emb, graph_edge_index, graph_weight)
-            emb = gat_layer(x=emb, edge_index=graph_edge_index)
+            emb = gat_layer(emb, graph_edge_index, graph_weight)
+            # emb = gat_layer(x=emb, edge_index=graph_edge_index)
             if layer_i < len(self.layer_stack)-1:
                 emb = batchnorm_layer(emb)
                 emb = F.elu(emb)
@@ -97,7 +97,8 @@ class TimeAttention_New(nn.Module):
 
         pad_mask = mask.unsqueeze(dim=-1).expand(-1, -1, mask.size(1))
         mask = torch.triu(torch.ones(pad_mask.size()), diagonal=1).bool()  # 上三角
-        # if pad_mask is cuda, then mask = mask.cuda()
+        if pad_mask.is_cuda:
+            mask = mask.cuda()
         mask_ = mask + pad_mask
         score = score.masked_fill(mask_, -2 ** 32 + 1)
 
