@@ -14,10 +14,9 @@ import torch
 MODEL = f"cardiffnlp/tweet-topic-21-multi"
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL)
+class_mapping = model.config.id2label
 if torch.cuda.is_available():
     model = model.to('cuda')
-
-class_mapping = model.config.id2label
 
 docs = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm/norm_texts_rawtexts_len2263914_aggby_timeline.pkl")
 docs = flattern(docs)

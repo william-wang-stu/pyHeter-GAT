@@ -451,30 +451,27 @@ def build_topic_similarity_user_edges(ut_mp:dict):
     
     return user_edges_dict
 
-def build_sim_edges(timelines:dict, labels_aggby_timeline:list, window_size:int)->dict:
-    n_cluster = max([max(elem) for elem in labels_aggby_timeline])+1
+def build_sim_edges(data_dict:dict, window_size:int)->dict:
+    n_cluster = max([max(elem['label']) for elem in data_dict.values()])+1
     tag2simedges_mp = {}
 
-    for (tag,cascades), labels_aggby in tqdm(zip(timelines.items(), labels_aggby_timeline),total=len(labels_aggby_timeline)):
-        assert len(cascades) == len(labels_aggby)
-
+    for tag, cascades in data_dict.items():
         # Only Keep First Appearance Foreach User
-        uni_cascades, uni_labels = [], []
+        uni_users, uni_labels = [], []
         us = set()
-        for caselem, label in zip(cascades, labels_aggby):
-            if caselem[0] in us: continue
-            us.add(caselem[0])
-            uni_cascades.append(caselem); uni_labels.append(label)
-        assert len(uni_cascades) == len(uni_labels)
+        for user, label in zip(cascades['user'], cascades['label']):
+            if user in us: continue
+            us.add(user)
+            uni_users.append(user); uni_labels.append(label)
+        assert len(uni_users) == len(uni_labels)
 
         # Aggregate SimEdges Foreach Class
         simedges = {key:[] for key in range(n_cluster)}
-        user_ids = [elem[0] for elem in uni_cascades]
         
         for i in range(len(uni_labels)-1):
             for j in range(max(0,i-1-window_size),min(i+1+window_size,len(uni_labels))): # (i-ws-1<-i->i+ws+1)
                 if uni_labels[i] == uni_labels[j]:
-                    simedges[uni_labels[i]].append((user_ids[i],user_ids[j]))
+                    simedges[uni_labels[i]].append((uni_users[i],uni_users[j]))
         
         tag2simedges_mp[tag] = simedges
     
@@ -485,6 +482,7 @@ def find_prominent_components_foreach_tag(tag2simedges_mp:dict, n_component:int=
     tagid2classids = {}
     for tag, simedges in tag2simedges_mp.items():
         ratios = [len(elem) for elem in simedges.values()]
+        if sum(ratios) == 0: continue
         ratios = [(idx, elem/sum(ratios)) for idx, elem in enumerate(ratios)]
         ratios = sorted(ratios, key=lambda x:x[1], reverse=True)
         
@@ -525,19 +523,19 @@ def merge_simedges_from_similar_tags(tag2simedges_mp:dict, classid2tagids:dict,)
         classid2simedges[class_id] = simedges
     return classid2simedges
 
-def build_heteredge_mats(timelines:dict, preprocess_timelines_keys:list, labels_aggby_timeline:list, window_size:int, n_component:int,):
+def build_heteredge_mats(data_dict:list, window_size:int, n_component:int,):
     # 1. Build Tag2SimEdges Mp
     tag2simedges_mp_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/tweet-embedding/llm-topic/tag2simedges_mp_windowsize{window_size}_model_tweet-topic-21-multi.pkl")
     if os.path.exists(tag2simedges_mp_filepath):
         tag2simedges_mp = load_pickle(tag2simedges_mp_filepath)
     else:
         # NOTE: we use timelines instead of preprocess_timelines bcz of aligning timelines and labels_aggby_timeline
-        tag2simedges_mp = build_sim_edges(timelines=timelines, labels_aggby_timeline=labels_aggby_timeline, window_size=window_size)
+        tag2simedges_mp = build_sim_edges(data_dict=data_dict, window_size=window_size)
         save_pickle(tag2simedges_mp, tag2simedges_mp_filepath)
     
     # 2. Reduce Timelines With Users WithIn Preprocess Timelines
-    tag2simedges_mp = {key:value for key,value in tag2simedges_mp.items() if key in preprocess_timelines_keys}
-    assert len(tag2simedges_mp) == len(preprocess_timelines_keys)
+    # tag2simedges_mp = {key:value for key,value in tag2simedges_mp.items() if key in preprocess_timelines_keys}
+    # assert len(tag2simedges_mp) == len(preprocess_timelines_keys)
 
     # Adjust Unbalanced Labels in Class 12
     tag2toomuchedges = {}
@@ -551,6 +549,8 @@ def build_heteredge_mats(timelines:dict, preprocess_timelines_keys:list, labels_
     
     # 3. Build Class2SimEdges Mp & Tag2Classid Mp
     tagid2classids = find_prominent_components_foreach_tag(tag2simedges_unbalanced, n_component=n_component)
+    save_pickle(tagid2classids, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/tagid2classids_windowsize200.pkl"))
+
     classid2tagids = {}
     for tag, classids in tagid2classids.items():
         for class_id in classids:
@@ -559,6 +559,7 @@ def build_heteredge_mats(timelines:dict, preprocess_timelines_keys:list, labels_
             classid2tagids[class_id].append(tag)
     
     classid2simedges = merge_simedges_from_similar_tags(tag2simedges_unbalanced, classid2tagids)
+    save_pickle(classid2simedges, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/classid2simedges_windowsize200.pkl"))
 
     # # 4. Build Class2Mat Mp
     # classid2simmat = {}
@@ -566,5 +567,12 @@ def build_heteredge_mats(timelines:dict, preprocess_timelines_keys:list, labels_
     #     extend_adj = create_sparsemat_from_edgelist(user_edges+simedges, m=n_user, n=n_user)
     #     extend_adj = get_sparse_tensor(extend_adj.tocoo())
     #     classid2simmat[class_id] = extend_adj
+
+    # classid2simmat = {}
+    # for class_id, simedges in classid2simedges.items():
+    #     edges = list(zip(*user_edges+simedges))
+    #     edges_t = torch.LongTensor(edges) # (2,#num_edges)
+    #     weight_t = torch.FloatTensor([1]*edges_t.size(1))
+    #     classid2simmat[class_id] = Data(edge_index=edges_t, edge_weight=weight_t)
 
     return classid2simedges, tagid2classids

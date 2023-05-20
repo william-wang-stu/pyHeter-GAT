@@ -56,7 +56,7 @@ nvcc --version
 # source ~/.bashrc
 
 conda env create --file environment.yml
-
+conda install pyg -c pyg
 # >>> rapids-23.02环境 + ~/pyHeter-GAT路径下执行下列操作
 conda develop .
 ```

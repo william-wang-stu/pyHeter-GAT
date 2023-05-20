@@ -48,8 +48,6 @@ def get_static_subnetwork(user_ids:set):
                     if relation == 1:
                         edges.append((uid2,uid1))
     
-    # save_pickle(edges, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/edgelist_subgraph.pkl")
-    save_pickle(edges, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.pkl"))
     logger.info(len(edges))
     return edges
 
@@ -188,30 +186,24 @@ def read_originial_content(old2new_mid_mp):
     logger.info(len(midwithcontent))
     return midwithcontent
 
-def read_user_ids():
-    with open(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/train.data"), 'rb') as file:
-        train_data_dict = pickle.load(file)
+def read_user_ids(train_data_dict_filepath, valid_data_dict_filepath, test_data_dict_filepath, start_uid=0):
+    train_data_dict = load_pickle(train_data_dict_filepath)
+    valid_data_dict = load_pickle(valid_data_dict_filepath)
+    test_data_dict  = load_pickle(test_data_dict_filepath)
+    data_dict = {**train_data_dict, **valid_data_dict, **test_data_dict}
 
-    with open(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/valid.data"), 'rb') as file:
-        valid_data_dict = pickle.load(file)
+    # dict_keys = set(train_data_dict.keys()) | set(valid_data_dict.keys()) | set(test_data_dict)
+    # dict_keys = [int(elem) for elem in dict_keys]
 
-    with open(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/test.data"), 'rb') as file:
-        test_data_dict = pickle.load(file)
-
-    dict_keys = set(train_data_dict.keys()) | set(valid_data_dict.keys()) | set(test_data_dict)
-    dict_keys = [int(elem) for elem in dict_keys]
-    us = set()
-    for elem in train_data_dict.values():
-        us |= set(elem['seq'])
-    for elem in valid_data_dict.values():
-        us |= set(elem['seq'])
-    for elem in test_data_dict.values():
-        us |= set(elem['seq'])
-    # us = set([value['seq'] for value in train_data_dict.values()]) & set([value['seq'] for value in valid_data_dict.values()]) & set([value['seq'] for value in test_data_dict.values()])
-
-    # save_pickle(us, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Aminer-pre/user_ids.pkl")
-    logger.info(f"keys={len(dict_keys)}, user-size={len(us)}")
-    return us
+    cnt = start_uid
+    uid_mp = {}
+    for elem in data_dict.values():
+        for uid in elem['user']:
+            if uid in uid_mp: continue
+            uid_mp[uid] = cnt
+            cnt += 1
+    
+    return uid_mp
 
 def read_wordtable():
     wordtable_filepath = os.path.join(DATA_ROOTPATH, "Weibo-Aminer/weibocontents/WordTable.txt")

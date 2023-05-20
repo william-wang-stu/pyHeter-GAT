@@ -27,3 +27,6 @@ class ScheduledOptim(object):
 
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = new_lr
+    
+    def get_state_dict(self):
+        return self.optimizer.state_dict()

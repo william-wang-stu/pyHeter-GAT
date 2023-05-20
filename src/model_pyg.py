@@ -18,18 +18,18 @@ def get_previous_user_mask(seq, user_size):
     previous_mask = np.tril(np.ones(prev_shape)).astype('float32')
     previous_mask = torch.from_numpy(previous_mask)
     if seq.is_cuda:
-        previous_mask = previous_mask.cuda()
+        previous_mask = previous_mask.to(seq.device)
     
     masked_seq = previous_mask * seqs.data.float()
 
     # force the 0th dimension (PAD) to be masked
     PAD_tmp = torch.zeros(seq.size(0), seq.size(1), 1)
     if seq.is_cuda:
-        PAD_tmp = PAD_tmp.cuda()
+        PAD_tmp = PAD_tmp.to(seq.device)
     masked_seq = torch.cat([masked_seq,PAD_tmp],dim=2)
     ans_tmp = torch.zeros(seq.size(0), seq.size(1), user_size)
     if seq.is_cuda:
-        ans_tmp = ans_tmp.cuda()
+        ans_tmp = ans_tmp.to(seq.device)
     masked_seq = ans_tmp.scatter_(2,masked_seq.long(),float('-inf'))
     return masked_seq
 
@@ -98,7 +98,7 @@ class TimeAttention_New(nn.Module):
         pad_mask = mask.unsqueeze(dim=-1).expand(-1, -1, mask.size(1))
         mask = torch.triu(torch.ones(pad_mask.size()), diagonal=1).bool()  # 上三角
         if pad_mask.is_cuda:
-            mask = mask.cuda()
+            mask = mask.to(pad_mask.device)
         mask_ = mask + pad_mask
         score = score.masked_fill(mask_, -2 ** 32 + 1)
 
@@ -146,7 +146,7 @@ class BasicGATNetwork(nn.Module):
         cas_uids = cas_uids[:,:-1]
         cas_intervals = cas_intervals[:,:-1]
 
-        user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]))
+        user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
         graph_emb = self.gat_network(graph, user_emb)
         seq_embs = F.embedding(cas_uids, graph_emb)
 
@@ -166,7 +166,7 @@ class HeterEdgeGATNetwork(nn.Module):
         """
         shape_ret: (n_units[-1], #user)
         """
-        super(BasicGATNetwork, self).__init__()
+        super(HeterEdgeGATNetwork, self).__init__()
 
         self.dropout = dropout
         self.inst_norm = instance_normalization
@@ -187,7 +187,7 @@ class HeterEdgeGATNetwork(nn.Module):
     def init_weights(self):
         init.xavier_normal_(self.fc_network.weight)
     
-    def forward(self, cas_uids, cas_intervals, graph):
+    def forward(self, cas_uids, cas_intervals, graphs):
     # def forward(self, cas_uids, cas_intervals, graph, static_emb:torch.Tensor, dynamic_embs:List[torch.Tensor]):
         # norm_embs = []
         # for i, dynamic_emb in enumerate(dynamic_embs):
@@ -201,10 +201,10 @@ class HeterEdgeGATNetwork(nn.Module):
         cas_uids = cas_uids[:,:-1]
         cas_intervals = cas_intervals[:,:-1]
 
-        user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]))
+        user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
         heter_user_embs = []
         for heter_i, gat_network in enumerate(self.heter_gat_network):
-            graph_emb = gat_network(graph, user_emb)
+            graph_emb = gat_network(graphs[heter_i], user_emb)
             heter_user_embs.append(graph_emb.unsqueeze(1)) # (Nu, 1,    D')
         type_aware_emb = torch.cat(heter_user_embs, dim=1) # (Nu, |Rs|, D')
         type_fusion_emb = self.additive_attention(user_emb, type_aware_emb) # (Nu, 1, D')

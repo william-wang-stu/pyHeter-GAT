@@ -289,6 +289,7 @@ def agg_tagemb_by_user(n_user:int, cascades:dict, pretrained_model_name:str='xlm
         for user_id, _ in cascade:
             user2tagids[user_id].append(tag_id)
     tag_embs = np.array(tag_embs)
+    save_pickle(tag_embs, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/tag_embs_model_xlm-roberta-base.pkl"))
     
     # Aggregate Tag Emb foreach User
     user2emb = []
@@ -299,9 +300,12 @@ def agg_tagemb_by_user(n_user:int, cascades:dict, pretrained_model_name:str='xlm
             emb = np.zeros(shape=tag_embs.shape[1])
         user2emb.append(emb)
     user2emb = np.array(user2emb)
+    save_pickle(user2emb, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/tag_embs_aggbyuser_model_xlm-roberta-base.pkl"))
 
     # TODO: Reduce LLM Dimension
     # NOTE: 1. Use Traditional dimension reduction methods, i.e. PCA; 2. Add FC-Layer in Total Model
     if pretrained_model_name == 'xlm-roberta-base':
-        user2emb = reduce_dimension(user2emb)
+        user2emb = reduce_dimension(user2emb, reduce_dim=128)
+    save_pickle(user2emb, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim128.pkl"))
+    
     return user2emb

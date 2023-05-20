@@ -108,8 +108,10 @@ class DataConstruct(object):
     ''' For data iteration '''
 
     def __init__(
-            self, dataset_dirpath, batch_size, seed, tmax, num_interval, data_type=0, load_dict=True, shuffle=True, append_EOS=True
+            self, dataset_dirpath, batch_size, seed, tmax, num_interval, tagid2classids=None, n_component=None, data_type=0, load_dict=True, shuffle=True, append_EOS=True
         ): # data_type=0(train), =1(valid), =2(test)
+        self.tagid2classids = tagid2classids
+        self.n_component = n_component
         self.batch_size = batch_size
         self.seed = seed
         self.tmax = tmax
@@ -119,7 +121,8 @@ class DataConstruct(object):
         self.append_EOS = append_EOS
 
         u2idx_filepath, idx2u_filepath = f"{dataset_dirpath}/u2idx.data", f"{dataset_dirpath}/idx2u.data"
-        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train.data", f"{dataset_dirpath}/valid.data", f"{dataset_dirpath}/test.data"
+        # train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train.data", f"{dataset_dirpath}/valid.data", f"{dataset_dirpath}/test.data"
+        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train_withcontent.pkl", f"{dataset_dirpath}/valid_withcontent.pkl", f"{dataset_dirpath}/test_withcontent.pkl"
         if not load_dict:
             self._u2idx = {}
             self._idx2u = []
@@ -154,22 +157,7 @@ class DataConstruct(object):
     
     def _buildIndex(self, train_data_filepath, valid_data_filepath, test_data_filepath):
         # compute an index of the users that appear at least once in the training and testing cascades.
-        # def read_user_set(data_filepath):
-        #     user_set = set()
-        #     for line in open(data_filepath):
-        #         if len(line.strip()) == 0:
-        #             continue
-        #         chunks = line.strip().split()
-        #         for chunk in chunks:
-        #             user, timestamp = chunk.split(',')
-        #             user_set.add(user)
-        #     return user_set
-        
-        # train_user_set = read_user_set(train_data_filepath)
-        # valid_user_set = read_user_set(valid_data_filepath)
-        # test_user_set  = read_user_set(test_data_filepath)
-        # user_set = train_user_set | valid_user_set | test_user_set
-        user_set = read_user_ids()
+        user_set = read_user_ids(train_data_filepath, valid_data_filepath, test_data_filepath)
 
         pos = 0
         self._u2idx[PAD_WORD] = pos
@@ -222,18 +210,20 @@ class DataConstruct(object):
         cascade_data = []
         data_dict = load_pickle(filename)
         for tag, cascades in data_dict.items():
-            # userlist = [self._u2idx[elem] for elem in cascades['user']]
-            userlist = [self._u2idx[elem] for elem in cascades['seq']]
-            # tslist = cascades['ts']
-            tslist = list(cascades['interval'])
-            # intervallist = np.ceil((tslist[-1]-tslist)/interval)
+            if self.tagid2classids is not None and tag not in self.tagid2classids: continue
+            userlist = [self._u2idx[elem] for elem in cascades['user']]
+            # userlist = [self._u2idx[elem] for elem in cascades['seq']]
+            
+            tslist = list(cascades['ts'])
+            # tslist = list(cascades['interval'])
+            
             intervallist = list(np.ceil((tslist[-1]-np.array(tslist))/(per_interval*3600)))
             for idx, interval in enumerate(intervallist):
                 if interval >= self.num_interval:
                     intervallist[idx] = self.num_interval-1
-            # contentlist = cascades['content']
-            contentlist = list(cascades['pre'])
-            # wordlist = cascades['word']
+            
+            contentlist = list(cascades['content'])
+            # contentlist = list(cascades['pre'])            
 
             if len(userlist) >= min_user and len(userlist) <= max_user:
                 total_len += len(userlist)
@@ -247,6 +237,7 @@ class DataConstruct(object):
                     'ts': tslist,
                     'interval': intervallist,
                     'content': contentlist,
+                    'classid': self.tagid2classids[tag] if self.tagid2classids is not None else None,
                 })
         return cascade_data, total_len
     
@@ -291,13 +282,19 @@ class DataConstruct(object):
             # cascade_contents = np.array([
             #     inst['content'] + [PAD_WORD] * (max_len - len(inst['content']))
             #     for inst in insts])
+            if self.tagid2classids is not None:
+                cascade_classids = np.array([
+                    inst['classid'] + [-1] * (self.n_component - len(inst['classid']))
+                    for inst in insts])
+            else:
+                cascade_classids = None
 
             cascade_users_tensor = torch.LongTensor(cascade_users)
             cascade_tss_tensor = torch.LongTensor(cascade_tss)
             cascade_intervals_tensor = torch.LongTensor(cascade_intervals)
             # cascade_contents_tensor = torch.LongTensor(cascade_contents)
-            return cascade_users_tensor, cascade_tss_tensor, cascade_intervals_tensor, None
-
+            return cascade_users_tensor, cascade_tss_tensor, cascade_intervals_tensor, cascade_classids
+        
         if self._iter_count < self.num_batch:
             batch_idx = self._iter_count
             self._iter_count += 1

@@ -64,9 +64,9 @@ def save_model(epoch, args, model, optimizer):
         "epoch": epoch,
         "args": args,
         "model": model.state_dict(),
-        "optimizer": optimizer.state_dict()
+        "optimizer": optimizer.get_state_dict() if type(optimizer).__name__ == 'ScheduledOptim' else optimizer.state_dict()
     }
-    save_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/basic/training/ckpt_epoch_{epoch}_model_{args.model}.pkl")
+    save_filepath = os.path.join(DATA_ROOTPATH, f"basic/training/ckpt_epoch_{epoch}_model_{args.model}.pkl")
     torch.save(state, save_filepath)
     # help release GPU memory
     del state
