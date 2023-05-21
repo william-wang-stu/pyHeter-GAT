@@ -1,6 +1,6 @@
 # Aminer Dataset
-# from utils.graph_aminer import *
-# from utils.graph import init_graph
+from utils.graph_aminer import *
+from utils.graph import init_graph, build_heteredge_mats
 from utils.utils import split_cascades, load_pickle, save_pickle
 from utils.graph_aminer import *
 from utils.tweet_embedding import agg_tagemb_by_user
@@ -9,6 +9,7 @@ from scipy.special import expit
 from tqdm import tqdm
 import numpy as np
 import torch
+from torch_geometric.data import Data
 
 # user_ids = read_user_ids()
 # user_ids = user_ids.values()
@@ -59,26 +60,26 @@ import torch
 # if torch.cuda.is_available():
 #     model = model.to('cuda')
 
-def get_topic_label(data_dict, model, tokenizer):
-    for tag, cascades in tqdm(data_dict.items()):
-        words = cascades['word']
-        with torch.no_grad():
-            tokens = tokenizer(words, return_tensors='pt', padding=True)
-            if torch.cuda.is_available():
-                tokens = {
-                    'input_ids': tokens['input_ids'].to('cuda'),
-                    # 'token_type_ids': tokens['token_type_ids'].to('cuda'),
-                    'attention_mask': tokens['attention_mask'].to('cuda'),
-                }
-            output = model(**tokens)
-            embeds = output.logits.detach().cpu()
-            scores = expit(embeds)
-            labels = np.array([np.where(score==max(score))[0][0] for score in scores])
-        cascades['label'] = labels
+# def get_topic_label(data_dict, model, tokenizer):
+#     for tag, cascades in tqdm(data_dict.items()):
+#         words = cascades['word']
+#         with torch.no_grad():
+#             tokens = tokenizer(words, return_tensors='pt', padding=True)
+#             if torch.cuda.is_available():
+#                 tokens = {
+#                     'input_ids': tokens['input_ids'].to('cuda'),
+#                     # 'token_type_ids': tokens['token_type_ids'].to('cuda'),
+#                     'attention_mask': tokens['attention_mask'].to('cuda'),
+#                 }
+#             output = model(**tokens)
+#             embeds = output.logits.detach().cpu()
+#             scores = expit(embeds)
+#             labels = np.array([np.where(score==max(score))[0][0] for score in scores])
+#         cascades['label'] = labels
 
-        del tokens, output
-        torch.cuda.empty_cache()
-    return data_dict
+#         del tokens, output
+#         torch.cuda.empty_cache()
+#     return data_dict
 
 # train_data_dict = load_pickle(train_data_dict_filepath)
 # train_data_dict_e = get_topic_label(train_data_dict)
@@ -101,3 +102,30 @@ def get_topic_label(data_dict, model, tokenizer):
 # pretrained_model_name = 'xlm-roberta-base'
 # user2emb = agg_tagemb_by_user(n_user=len(user_set), cascades=data_dict, pretrained_model_name='xlm-roberta-base')
 # save_pickle(user2emb, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim128.pkl")
+
+# NOTE: Build HeterEdge Mats
+# user_edges = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/edges.pkl")
+
+# classid2simedges, tagid2classids = build_heteredge_mats(data_dict=load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/train_withcontent.pkl"), window_size=200, n_component=3)
+# classid2newsimedges = {}
+
+# for classid, simedges in classid2simedges.items():
+#     new_simedges = []
+#     for uid1, uid2 in simedges:
+#         if uid1 in u2idx and uid2 in u2idx:
+#             new_simedges.append((u2idx[uid1], u2idx[uid2]))
+#     logger.info(f"{classid}, {len(new_simedges)}, {len(simedges)}")
+#     classid2newsimedges[classid] = new_simedges
+
+# classid2simmat = {}
+# for class_id, simedges in classid2newsimedges.items():
+#     edges = list(zip(*user_edges+simedges))
+#     edges_t = torch.LongTensor(edges) # (2,#num_edges)
+#     weight_t = torch.FloatTensor([1]*edges_t.size(1))
+#     classid2simmat[class_id] = Data(edge_index=edges_t, edge_weight=weight_t)
+# save_pickle(classid2simmat, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/llm/classid2simmat_windowsize200.pkl")
+
+# NOTE: User-Side Feats
+# structural_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/vertex_feature_subgle483.npy"))
+# three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
+# deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), max_idx=user_nodes[-1]+1)

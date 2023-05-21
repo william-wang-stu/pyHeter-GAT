@@ -16,6 +16,7 @@ from utils.Constants import PAD_WORD, EOS_WORD, PAD, EOS
 from utils.graph_aminer import read_user_ids
 from torch.utils.data import Dataset
 from torch.utils.data.sampler import Sampler
+from collections import Counter
 # from sklearn import preprocessing
 import numpy as np
 import os
@@ -108,21 +109,20 @@ class DataConstruct(object):
     ''' For data iteration '''
 
     def __init__(
-            self, dataset_dirpath, batch_size, seed, tmax, num_interval, tagid2classids=None, n_component=None, data_type=0, load_dict=True, shuffle=True, append_EOS=True
+            self, dataset_dirpath, batch_size, seed, tmax, num_interval, n_component=None, data_type=0, load_dict=True, shuffle=True, append_EOS=True
         ): # data_type=0(train), =1(valid), =2(test)
-        self.tagid2classids = tagid2classids
-        self.n_component = n_component
         self.batch_size = batch_size
         self.seed = seed
         self.tmax = tmax
         self.num_interval = num_interval
+        self.n_component = n_component
         self.data_type = data_type
         self.shuffle = shuffle
         self.append_EOS = append_EOS
 
         u2idx_filepath, idx2u_filepath = f"{dataset_dirpath}/u2idx.data", f"{dataset_dirpath}/idx2u.data"
         # train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train.data", f"{dataset_dirpath}/valid.data", f"{dataset_dirpath}/test.data"
-        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train_withcontent.pkl", f"{dataset_dirpath}/valid_withcontent.pkl", f"{dataset_dirpath}/test_withcontent.pkl"
+        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train_withcontent_withlabel.pkl", f"{dataset_dirpath}/valid_withcontent_withlabel.pkl", f"{dataset_dirpath}/test_withcontent_withlabel.pkl"
         if not load_dict:
             self._u2idx = {}
             self._idx2u = []
@@ -210,34 +210,37 @@ class DataConstruct(object):
         cascade_data = []
         data_dict = load_pickle(filename)
         for tag, cascades in data_dict.items():
-            if self.tagid2classids is not None and tag not in self.tagid2classids: continue
             userlist = [self._u2idx[elem] for elem in cascades['user']]
             # userlist = [self._u2idx[elem] for elem in cascades['seq']]
             
             tslist = list(cascades['ts'])
             # tslist = list(cascades['interval'])
-            
             intervallist = list(np.ceil((tslist[-1]-np.array(tslist))/(per_interval*3600)))
             for idx, interval in enumerate(intervallist):
                 if interval >= self.num_interval:
                     intervallist[idx] = self.num_interval-1
             
-            contentlist = list(cascades['content'])
-            # contentlist = list(cascades['pre'])            
+            # contentlist = list(cascades['content'])
+            # contentlist = list(cascades['pre'])
+
+            if self.n_component is not None:
+                labellist = list(cascades['label'])
+                classid2cnt = Counter(labellist)
+                classid = [k for k,c in classid2cnt.most_common(self.n_component) if c>=max(1, int(0.1*len(labellist)))]
 
             if len(userlist) >= min_user and len(userlist) <= max_user:
                 total_len += len(userlist)
                 if self.append_EOS:
                     userlist.append(EOS)
-                    tslist.append(0)
+                    # tslist.append(0)
                     intervallist.append(0)
-                    contentlist.append(EOS_WORD)
+                    # contentlist.append(EOS_WORD)
                 cascade_data.append({
                     'user': userlist,
-                    'ts': tslist,
+                    # 'ts': tslist,
                     'interval': intervallist,
-                    'content': contentlist,
-                    'classid': self.tagid2classids[tag] if self.tagid2classids is not None else None,
+                    # 'content': contentlist,
+                    'classid': classid if self.n_component is not None else None,
                 })
         return cascade_data, total_len
     
@@ -273,27 +276,28 @@ class DataConstruct(object):
             cascade_users = np.array([
                 inst['user'] + [PAD] * (max_len - len(inst['user']))
                 for inst in insts])
-            cascade_tss = np.array([
-                inst['ts'] + [0] * (max_len - len(inst['ts']))
-                for inst in insts])
+            # cascade_tss = np.array([
+            #     inst['ts'] + [0] * (max_len - len(inst['ts']))
+            #     for inst in insts])
             cascade_intervals = np.array([
                 inst['interval'] + [0] * (max_len - len(inst['interval']))
                 for inst in insts])
             # cascade_contents = np.array([
             #     inst['content'] + [PAD_WORD] * (max_len - len(inst['content']))
             #     for inst in insts])
-            if self.tagid2classids is not None:
+            if self.n_component is not None:
                 cascade_classids = np.array([
                     inst['classid'] + [-1] * (self.n_component - len(inst['classid']))
                     for inst in insts])
+                cascade_classids_tensor = torch.LongTensor(cascade_classids)
             else:
-                cascade_classids = None
+                cascade_classids_tensor = None
 
             cascade_users_tensor = torch.LongTensor(cascade_users)
-            cascade_tss_tensor = torch.LongTensor(cascade_tss)
+            # cascade_tss_tensor = torch.LongTensor(cascade_tss)
             cascade_intervals_tensor = torch.LongTensor(cascade_intervals)
             # cascade_contents_tensor = torch.LongTensor(cascade_contents)
-            return cascade_users_tensor, cascade_tss_tensor, cascade_intervals_tensor, cascade_classids
+            return cascade_users_tensor, cascade_intervals_tensor, cascade_classids_tensor
         
         if self._iter_count < self.num_batch:
             batch_idx = self._iter_count
@@ -309,8 +313,8 @@ class DataConstruct(object):
                         
             # seq_users, seq_tss = pad_to_longest(seq_insts)
             # return seq_users, seq_tss
-            seq_users, seq_tss, seq_intervals, seq_contents = pad_to_longest2(seq_insts)
-            return seq_users, seq_tss, seq_intervals, seq_contents
+            seq_users, seq_intervals, seq_classids = pad_to_longest2(seq_insts)
+            return seq_users, seq_intervals, seq_classids
         else:
             if self.shuffle:
                 random.seed(self.seed)

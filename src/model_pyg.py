@@ -125,7 +125,7 @@ class BasicGATNetwork(nn.Module):
         self.user_size = shape_ret[1]
         self.user_emb = nn.Embedding(self.user_size, n_feat, padding_idx=PAD)
         self.gat_network = GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout)
-        self.time_attention = TimeAttention_New(num_interval=num_interval, in_features1=n_units[0])
+        self.time_attention = TimeAttention_New(num_interval=num_interval, in_features1=n_units[-1])
         self.fc_network = nn.Linear(shape_ret[0], shape_ret[1])
         self.init_weights()
     
@@ -148,7 +148,7 @@ class BasicGATNetwork(nn.Module):
 
         user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
         graph_emb = self.gat_network(graph, user_emb)
-        seq_embs = F.embedding(cas_uids, graph_emb)
+        seq_embs = F.embedding(cas_uids, graph_emb) # (bs, max_len, D)
 
         mask = (cas_uids == PAD)
         seq_embs = self.time_attention(cas_intervals, seq_embs, mask)
@@ -160,8 +160,8 @@ class BasicGATNetwork(nn.Module):
         return output
 
 class HeterEdgeGATNetwork(nn.Module):
-    def __init__(self, n_feat, n_adj, n_units, n_heads, num_interval, shape_ret,
-        attn_dropout, dropout, instance_normalization=False,
+    def __init__(self, n_feat, n_adj, n_comp, n_units, n_heads, num_interval, shape_ret,
+        attn_dropout, dropout, instance_normalization=False, use_topic_preference=False
     ):
         """
         shape_ret: (n_units[-1], #user)
@@ -170,6 +170,7 @@ class HeterEdgeGATNetwork(nn.Module):
 
         self.dropout = dropout
         self.inst_norm = instance_normalization
+        self.use_topic_pref = use_topic_preference
         # if self.inst_norm:
         #     for i, dynamic_nfeat in enumerate(dynamic_nfeats):
         #         norm = nn.InstanceNorm1d(dynamic_nfeat, momentum=0.0, affine=True)
@@ -179,15 +180,16 @@ class HeterEdgeGATNetwork(nn.Module):
         self.heter_gat_network = nn.ModuleList([
             GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout)
             for _ in range(n_adj)])
-        self.additive_attention = AdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
-        self.time_attention = TimeAttention_New(num_interval=num_interval, in_features1=n_units[0])
-        self.fc_network = nn.Linear(shape_ret[0]*(n_adj+1), shape_ret[1])
+        if not self.use_topic_pref:
+            self.additive_attention = AdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
+        self.time_attention = TimeAttention_New(num_interval=num_interval, in_features1=shape_ret[0]*(n_comp+1))
+        self.fc_network = nn.Linear(shape_ret[0]*(n_comp+1), shape_ret[1])
         self.init_weights()
     
     def init_weights(self):
         init.xavier_normal_(self.fc_network.weight)
     
-    def forward(self, cas_uids, cas_intervals, graphs):
+    def forward(self, cas_uids, cas_intervals, hedge_graphs, cas_classids:torch.Tensor, user_topic_preference:torch.Tensor=None):
     # def forward(self, cas_uids, cas_intervals, graph, static_emb:torch.Tensor, dynamic_embs:List[torch.Tensor]):
         # norm_embs = []
         # for i, dynamic_emb in enumerate(dynamic_embs):
@@ -198,24 +200,55 @@ class HeterEdgeGATNetwork(nn.Module):
         #     norm_embs.append(norm_emb)
         # emb = torch.cat(norm_embs, dim=1)
         # emb = torch.cat((emb,static_emb),dim=1)
+        assert len(hedge_graphs) == len(self.heter_gat_network)
+
         cas_uids = cas_uids[:,:-1]
         cas_intervals = cas_intervals[:,:-1]
 
         user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
         heter_user_embs = []
         for heter_i, gat_network in enumerate(self.heter_gat_network):
-            graph_emb = gat_network(graphs[heter_i], user_emb)
-            heter_user_embs.append(graph_emb.unsqueeze(1)) # (Nu, 1,    D')
-        type_aware_emb = torch.cat(heter_user_embs, dim=1) # (Nu, |Rs|, D')
-        type_fusion_emb = self.additive_attention(user_emb, type_aware_emb) # (Nu, 1, D')
-        # TODO: how to aggregate from different adjs
-        seq_embs = F.embedding(cas_uids, type_fusion_emb)
+            graph_emb = gat_network(hedge_graphs[heter_i], user_emb)
+            heter_user_embs.append(graph_emb.unsqueeze(1))  # (Nu,      1, D')
+        type_aware_embs = torch.cat(heter_user_embs, dim=1) # (Nu, 1+|Rs|, D')
 
+        aware_seq_embs = F.embedding(cas_uids, type_aware_embs.reshape(self.user_size,-1))
+        bs, ml, _ = aware_seq_embs.size()
+        aware_seq_embs = aware_seq_embs.reshape(bs, ml, -1, type_aware_embs.size(-1)) # (bs, max_len, |Rs|+1, D')
+        
+        selected_aware_seq_embs = torch.zeros(bs, ml, cas_classids.size(1), type_aware_embs.size(-1)) # (bs, max_len, n_comp, D')
+        if aware_seq_embs.is_cuda:
+            selected_aware_seq_embs = selected_aware_seq_embs.to(aware_seq_embs.device)
+        for batch_i in range(aware_seq_embs.size(0)):
+            selected_aware_seq_embs[batch_i] = aware_seq_embs[batch_i, :, cas_classids[batch_i], :]
+        n_comp, d = selected_aware_seq_embs.size()[2:]
+        selected_aware_seq_embs = selected_aware_seq_embs.view(-1,n_comp,d) # (bs*max_len, n_comp, D')
+        
+        if not self.use_topic_pref:
+            user_seq_embs = F.embedding(cas_uids, user_emb)
+            user_seq_embs = user_seq_embs.view(-1,user_seq_embs.size(-1)) # (bs*max_len, D)
+            assert user_seq_embs.size(0) == selected_aware_seq_embs.size(0)
+
+            fusion_seq_embs = self.additive_attention(user_seq_embs, selected_aware_seq_embs) # (bs*max_len, 1, D')
+            seq_embs = torch.cat((selected_aware_seq_embs, fusion_seq_embs),dim=1).reshape(bs,ml,-1) # (bs, max_len, (n_comp+1)*D')
+        else:
+            topic_prefer_seqs = F.embedding(cas_uids, user_topic_preference)
+            selected_topic_prefer_seqs = torch.zeros(bs, ml, cas_classids.size(1))
+            if topic_prefer_seqs.is_cuda:
+                selected_topic_prefer_seqs = selected_topic_prefer_seqs.to(topic_prefer_seqs.device)
+            for batch_i in range(aware_seq_embs.size(0)):
+                selected_topic_prefer_seqs[batch_i] = topic_prefer_seqs[batch_i, :, cas_classids[batch_i],]
+            selected_topic_prefer_seqs = selected_topic_prefer_seqs.view(bs*ml,-1,1)
+            assert selected_aware_seq_embs.size(0) == selected_topic_prefer_seqs.size(0)
+            
+            fusion_seq_embs = (selected_aware_seq_embs*selected_topic_prefer_seqs).sum(dim=1).view(bs*ml, -1).unsqueeze(1) # (bs*max_len, 1, D')
+            seq_embs = torch.cat((selected_aware_seq_embs, fusion_seq_embs),dim=1).reshape(bs,ml,-1) # (bs, max_len, (n_comp+1)*D')
+        
         mask = (cas_uids == PAD)
         seq_embs = self.time_attention(cas_intervals, seq_embs, mask)
         seq_embs = F.dropout(seq_embs, self.dropout)
 
-        output = self.fc_network(seq_embs)
+        output = self.fc_network(seq_embs) # (bs, max_len, |V|)
         mask = get_previous_user_mask(cas_uids, self.user_size)
         output = output + mask
         return output

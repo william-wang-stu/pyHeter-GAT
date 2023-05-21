@@ -549,7 +549,7 @@ def build_heteredge_mats(data_dict:list, window_size:int, n_component:int,):
     
     # 3. Build Class2SimEdges Mp & Tag2Classid Mp
     tagid2classids = find_prominent_components_foreach_tag(tag2simedges_unbalanced, n_component=n_component)
-    save_pickle(tagid2classids, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/tagid2classids_windowsize200.pkl"))
+    save_pickle(tagid2classids, os.path.join(DATA_ROOTPATH, f"Weibo-Aminer/llm/tagid2classids_windowsize{window_size}.pkl"))
 
     classid2tagids = {}
     for tag, classids in tagid2classids.items():
@@ -559,7 +559,7 @@ def build_heteredge_mats(data_dict:list, window_size:int, n_component:int,):
             classid2tagids[class_id].append(tag)
     
     classid2simedges = merge_simedges_from_similar_tags(tag2simedges_unbalanced, classid2tagids)
-    save_pickle(classid2simedges, os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/classid2simedges_windowsize200.pkl"))
+    save_pickle(classid2simedges, os.path.join(DATA_ROOTPATH, f"Weibo-Aminer/llm/classid2simedges_windowsize{window_size}.pkl"))
 
     # # 4. Build Class2Mat Mp
     # classid2simmat = {}

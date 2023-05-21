@@ -10,6 +10,7 @@ from utils.graph_aminer import *
 from utils.metric import compute_metrics
 from utils.Constants import PAD, EOS
 from utils.Optim import ScheduledOptim
+from utils.Patience import EarlyStopping
 from src.data_loader import DataConstruct
 from src.model_pyg import *
 import numpy as np
@@ -45,21 +46,23 @@ parser.add_argument('--n-interval', type=int, default=40, help="Number of Time I
 parser.add_argument('--n-component', type=int, default=3, help="Number of Prominent Component Topic Classes Foreach Topic")
 parser.add_argument('--window-size', type=int, default=200, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
+parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
 parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
 parser.add_argument('--unified-dim', type=int, default=128, help='Unified Dimension of Different Feature Spaces.')
 parser.add_argument('--d_model', type=int, default=64, help='Options in ScheduledOptim')
 parser.add_argument('--n_warmup_steps', type=int, default=1000, help='Options in ScheduledOptim')
+parser.add_argument('--patience', type=int, default=10, help='Patience Steps of EarlyStopping')
 # >> Hyper-Param
 parser.add_argument('--epochs', type=int, default=300, help='Number of epochs to train.')
 parser.add_argument('--batch-size', type=int, default=32, help='Number of epochs to train.')
 # [default] hetersparsegat: 3e-3, hypergat: 3e-3, densegat: 3e-2
 parser.add_argument('--lr', type=float, default=3e-2, help='Initial learning rate.')
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
-parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate (1 - keep probability).')
+parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
 parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropout rate (1 - keep probability).')
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
-parser.add_argument('--check-point', type=int, default=50, help="Check point")
+parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
@@ -102,31 +105,25 @@ def get_scores(pred_cascade:torch.Tensor, gold_cascade:torch.Tensor, k_list=[10,
     scores = compute_metrics(pred_cascade, gold_cascade, k_list)
     return scores
 
-def train(epoch_i, batch_data, classid2simmat, graph, model, optimizer, loss_func, writer, log_desc='train_'):
+def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='train_'):
     model.train()
 
     loss, correct, total = 0., 0., 0.
-    for _, batch in enumerate((batch_data)):
+    for _, batch in enumerate(data['batch']):
     # for _, batch in enumerate(tqdm(batch_data)):
-        # if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
 
-        cascade_users, cascade_tss, cascade_intervals, cascade_classids = batch
+        cas_users, cas_intervals, cas_classids = batch
         if args.cuda:
-            cascade_users = cascade_users.to(args.gpu)
-            cascade_intervals = cascade_intervals.to(args.gpu)
-        gold_cascade = cascade_users[:, 1:]
+            cas_users = cas_users.to(args.gpu)
+            cas_intervals = cas_intervals.to(args.gpu)
+        gold_cascade = cas_users[:, 1:]
         
         optimizer.zero_grad()
         if args.model == 'densegat':
-            pred_cascade = model(cascade_users, cascade_intervals, graph)
+            pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            if not args.use_random_multiedge:
-                hedge_adjs = [[classid2simmat[classid] if classid!=-1 else graph for classid in classids] for classids in cascade_classids]
-            else:
-                # hedge_adjs = [random_classid2simmat[classid].to(args.gpu) if args.cuda else random_classid2simmat[classid] for classid in tagid2classids[hashtag]]
-                # hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
-                hedge_adjs = [graph] * (args.n_component+1)
-            pred_cascade = model(cascade_users, cascade_intervals, hedge_adjs)
+            pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['user_topic_preference'])
+        
         loss_batch, n_correct = get_performance(loss_func, pred_cascade, gold_cascade)
         loss_batch.backward()
         optimizer.step()
@@ -141,7 +138,7 @@ def train(epoch_i, batch_data, classid2simmat, graph, model, optimizer, loss_fun
 
     return loss/total, n_correct/total
 
-def evaluate(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, k_list=[10,50,100], log_desc='valid_'):
+def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[10,50,100], log_desc='valid_'):
     model.eval()
 
     loss, correct, total = 0., 0., 0.
@@ -149,27 +146,20 @@ def evaluate(epoch_i, batch_data, graph, model, optimizer, loss_func, writer, k_
     for k in k_list:
         scores[f'hits@{k}'] = 0
         scores[f'map@{k}'] = 0
-    for _, batch in enumerate((batch_data)):
+    for _, batch in enumerate((data['batch'])):
     # for _, batch in enumerate(tqdm(batch_data)):
-        # if hashtag not in labels_mp or (args.model == 'heteredgegat' and hashtag not in tagid2classids): continue
 
-        cascade_users, cascade_tss, cascade_intervals, cascade_contents = batch
+        cas_users, cas_intervals, cas_classids = batch
         if args.cuda:
-            cascade_users = cascade_users.to(args.gpu)
-            cascade_intervals = cascade_intervals.to(args.gpu)
-        gold_cascade = cascade_users[:, 1:]
+            cas_users = cas_users.to(args.gpu)
+            cas_intervals = cas_intervals.to(args.gpu)
+        gold_cascade = cas_users[:, 1:]
         
+        optimizer.zero_grad()
         if args.model == 'densegat':
-            pred_cascade = model(cascade_users, cascade_intervals, graph)
-        # elif args.model == 'heteredgegat':
-        #     if not args.use_random_multiedge:
-        #         hedge_adjs = [classid2simmat[classid].to(args.gpu) if args.cuda else classid2simmat[classid] for classid in tagid2classids[hashtag]]
-        #         hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
-        #     else:
-        #         hedge_adjs = [random_classid2simmat[classid].to(args.gpu) if args.cuda else random_classid2simmat[classid] for classid in tagid2classids[hashtag]]
-        #         hedge_adjs = hedge_adjs + [adj]*(args.n_component+1-len(hedge_adjs))
-        #         # hedge_adjs = [adj] * (args.n_component+1)
-        #     output = model(hedge_adjs, static_emb, dynamic_embs)
+            pred_cascade = model(cas_users, cas_intervals, graph)
+        elif args.model == 'heteredgegat':
+            pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['user_topic_preference'])
         
         loss_batch, n_correct = get_performance(loss_func, pred_cascade, gold_cascade)
         n_words = (gold_cascade.ne(PAD)*(gold_cascade.ne(EOS))).data.sum().float()
@@ -213,43 +203,51 @@ def main():
     graph = Data(edge_index=edges_t, edge_weight=weight_t)
     if args.cuda:
         graph = graph.to(args.gpu)
-    classid2simmat = None
+    hedge_graphs = None
+    user_topic_preference = None
 
     dataset_dirpath = f"{DATA_ROOTPATH}/Weibo-Aminer"
     n_units = [int(x) for x in args.hidden_units.strip().split(",")]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
+    
     # TODO: decide on n_feat
     if args.model == 'densegat':
         train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=0, load_dict=False)
         valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=1, load_dict=True)
         test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=2, load_dict=True)
         
-        model = BasicGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), attn_dropout=args.attn_dropout, dropout=args.dropout)
+        model = BasicGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
+            attn_dropout=args.attn_dropout, dropout=args.dropout)
+    
     elif args.model == 'heteredgegat':
-        # classid2simedges, tagid2classids = build_heteredge_mats(data_dict=load_pickle(f"{dataset_dirpath}/train_withcontent.data"), window_size=args.window_size, n_component=args.n_component)
-        # classid2simmat = {}
-        # for class_id, simedges in classid2simedges.items():
-        #     edges = list(zip(*user_edges+simedges))
-        #     edges_t = torch.LongTensor(edges) # (2,#num_edges)
-        #     weight_t = torch.FloatTensor([1]*edges_t.size(1))
-        #     classid2simmat[class_id] = Data(edge_index=edges_t, edge_weight=weight_t)
-        tagid2classids = load_pickle(os.path.join(DATA_ROOTPATH, f"Weibo-Aminer/llm/tagid2classids_windowsize{args.window_size}.pkl"))
         classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"Weibo-Aminer/llm/classid2simmat_windowsize{args.window_size}.pkl"))
         if args.cuda:
             classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
         
-        train_data = DataConstruct(dataset_dirpath=dataset_dirpath, tagid2classids=tagid2classids, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=0, load_dict=False)
-        valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, tagid2classids=tagid2classids, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=1, load_dict=True)
-        test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, tagid2classids=tagid2classids, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=2, load_dict=True)
-    
-        model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=args.n_component, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), attn_dropout=args.attn_dropout, dropout=args.dropout)
+        n_simmat = max(classid2simmat.keys())+1
+        hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
         
+        if args.use_topic_preference:
+            user_topic_preference = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/llm/user_topic_pref_cnt.pkl")
+            # -1 use mean vector
+            user_topic_preference = torch.cat((user_topic_preference, torch.mean(user_topic_preference, dim=1).view(-1,1)), dim=1)
+            if args.cuda:
+                user_topic_preference = user_topic_preference.to(args.gpu)
+                
+        train_data = DataConstruct(dataset_dirpath=dataset_dirpath, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=0, load_dict=False)
+        valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=1, load_dict=True)
+        test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=2, load_dict=True)
+
+        model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=n_simmat+1, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
+            attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_preference=args.use_topic_preference)
+    
     # loss_func = torch.nn.CrossEntropyLoss(ignore_index=PAD)
     loss_func = get_cascade_criterion(train_data.user_size)
 
     optimizer = ScheduledOptim(
         optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-09), 
         args.d_model, args.n_warmup_steps,)
+    patience = EarlyStopping(patience=args.patience)
     
     if args.cuda:
         model = model.to(args.gpu)
@@ -265,22 +263,41 @@ def main():
     logger.info("training...")
     for epoch_i in range(args.epochs):
         start = time.time()
-        train_loss, train_acc = train(epoch_i, train_data, classid2simmat, graph, model, optimizer, loss_func, writer)
-        logger.info('   - (Training)    loss: {loss:8.5f}, accuracy: {accu:3.3f} %, elapse: {elapse:3.3f} min, gpu memory usage: {mem:3.3f} MiB'.format(
+        train_loss, train_acc = train(epoch_i, {
+            'batch': train_data, 'hedge_graphs': hedge_graphs, 'user_topic_preference': user_topic_preference,
+            }, graph, model, optimizer, loss_func, writer)
+        logger.info('   - (Training)    loss: {loss:8.5f}, accuracy: {accu:3.6f} %, elapse: {elapse:3.3f} min, gpu memory usage: {mem:3.3f} MiB'.format(
             loss=train_loss, accu=100*train_acc, elapse=(time.time()-start)/60, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
         
-        if (epoch_i + 1) % args.check_point == 0:
-            logger.info("epoch %d, checkpoint!", epoch_i)
-            valid_loss, valid_acc = train(epoch_i, valid_data, classid2simmat, graph, model, optimizer, loss_func, writer)
-            logger.info('   - (Validating)    loss: {loss:8.5f}, accuracy: {accu:3.3f} %, gpu memory usage: {mem:3.3f} MiB'.format(
-                loss=valid_loss, accu=100*valid_acc, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
-            
+        early_stop = patience.step(train_loss.detach().cpu().numpy(), train_acc.detach().cpu().numpy())
+        if early_stop:
             start = time.time()
-            scores = evaluate(epoch_i, test_data, graph, model, optimizer, loss_func, writer)
+            scores = evaluate(epoch_i, {
+                'batch': test_data, 'hedge_graphs': hedge_graphs, 'user_topic_preference': user_topic_preference,
+                }, graph, model, optimizer, loss_func, writer)
             logger.info('   - (Testing)    scores: {scores}, elapse: {elapse:3.3f} min, gpu memory usage={mem:3.3f} MiB'.format(
                 scores=" ".join([f"{key}:{value:3.6f}" for key,value in scores.items()]),
                 elapse=(time.time()-start)/60, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
             save_model(epoch_i, args, model, optimizer)
+            break
+        
+        if (epoch_i + 1) % args.check_point == 0:
+            logger.info("epoch %d, checkpoint!", epoch_i)
+            valid_loss, valid_acc = train(epoch_i, {
+                'batch': valid_data, 'hedge_graphs': hedge_graphs, 'user_topic_preference': user_topic_preference,
+                }, graph, model, optimizer, loss_func, writer)
+            logger.info('   - (Validating)    loss: {loss:8.5f}, accuracy: {accu:3.6f} %, gpu memory usage: {mem:3.3f} MiB'.format(
+                loss=valid_loss, accu=100*valid_acc, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
+            
+            start = time.time()
+            scores = evaluate(epoch_i, {
+                'batch': test_data, 'hedge_graphs': hedge_graphs, 'user_topic_preference': user_topic_preference,
+                }, graph, model, optimizer, loss_func, writer)
+            logger.info('   - (Testing)    scores: {scores}, elapse: {elapse:3.3f} min, gpu memory usage={mem:3.3f} MiB'.format(
+                scores=" ".join([f"{key}:{value:3.6f}" for key,value in scores.items()]),
+                elapse=(time.time()-start)/60, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
+            save_model(epoch_i, args, model, optimizer)
+            
     logger.info("Total Elapse: {elapse:3.3f} min".format(elapse=(time.time()-t_total)/60))
 
 if __name__ == '__main__':
