@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.stats import rankdata
+from utils.Constants import PAD, EOS
 
 def apk(actual, predicted, k=10):
     """
@@ -54,9 +55,18 @@ def compute_metrics(y_prob, y_true, k_list=[10,50,100]):
     """
     y_prob = np.array(y_prob)
     y_true = np.array(y_true)
+    
+    y_prob_simp, y_true_simp = [], []
+    for i in range(y_true.shape[0]): # predict counts
+        if y_true[i]!=PAD and y_true[i]!=EOS:
+            y_prob_simp.append(y_prob[i])
+            y_true_simp.append(y_true[i])
+    y_prob_simp = np.array(y_prob_simp)
+    y_true_simp = np.array(y_true_simp)
+    
     scores = {}
-    scores['MRR'] = MRR(y_prob, y_true)
+    scores['MRR'] = MRR(y_prob_simp, y_true_simp)
     for k in k_list:
-        scores['hits@' + str(k)] = hits_k(y_prob, y_true, k=k)
-        scores['map@' + str(k)] = mapk(y_prob, y_true, k=k)
+        scores['hits@' + str(k)] = hits_k(y_prob_simp, y_true_simp, k=k)
+        scores['map@' + str(k)] = mapk(y_prob_simp, y_true_simp, k=k)
     return scores
