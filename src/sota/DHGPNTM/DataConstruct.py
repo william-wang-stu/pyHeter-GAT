@@ -19,11 +19,14 @@ class Options(object):
         #data_name = 'twitter'
         #train file path.
         # self.train_data = data_name+'/cascade.txt'
-        self.train_data = data_name+'/train_withcontent_withlabel.pkl'
+        # self.train_data = data_name+'/train_withcontent_withlabel.pkl'
+        self.train_data = data_name+'/train.data'
         #valid file path.
-        self.valid_data = data_name+'/valid_withcontent_withlabel.pkl'
+        # self.valid_data = data_name+'/valid_withcontent_withlabel.pkl'
+        self.valid_data = data_name+'/valid.data'
         #test file path.
-        self.test_data = data_name+'/test_withcontent_withlabel.pkl'
+        # self.test_data = data_name+'/test_withcontent_withlabel.pkl'
+        self.test_data = data_name+'/test.data'
 
         self.u2idx_dict = data_name+'/u2idx.data'
 
@@ -33,7 +36,8 @@ class Options(object):
 
         self.batch_size = 32
 
-        self.net_data = data_name+'/edges.pkl'
+        # self.net_data = data_name+'/edges.pkl'
+        self.net_data = data_name+'/edges.data'
 
         self.embed_dim = 64
         # self.embed_file = data_name+'/dw'+str(self.embed_dim)+'.txt'
@@ -84,7 +88,8 @@ def LoadDynamicDiffusionGraph(data_name, time_step_split=time_step_split):
 
         t_cascades = []
         for _, cascades in cascade_dict.items():
-            userlist = [[_u2idx[user], ts] for user, ts in zip(cascades['user'], cascades['ts']) if user in _u2idx]
+            # userlist = [[_u2idx[user], ts] for user, ts in zip(cascades['user'], cascades['ts']) if user in _u2idx]
+            userlist = [[_u2idx[user], ts] for user, ts in zip(cascades['seq'], cascades['interval']) if user in _u2idx]
             # userlist = [chunk.split(',') for chunk in chunks]
             # userlist = [[_u2idx[x[0]], int(float(x[1]))] for x in userlist if x[0] in _u2idx]
             pair_user = [(i[0], j[0], j[1]) for i, j in zip(userlist[::1], userlist[1::1])]

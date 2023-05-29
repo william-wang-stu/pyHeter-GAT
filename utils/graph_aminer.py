@@ -197,8 +197,9 @@ def read_user_ids(train_data_dict_filepath, valid_data_dict_filepath, test_data_
 
     cnt = start_uid
     uid_mp = {}
+    key = 'user' if 'user' in list(data_dict.values())[0] else 'seq'
     for elem in data_dict.values():
-        for uid in elem['user']:
+        for uid in elem[key]:
             if uid in uid_mp: continue
             uid_mp[uid] = cnt
             cnt += 1

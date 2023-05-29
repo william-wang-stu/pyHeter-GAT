@@ -121,8 +121,8 @@ class DataConstruct(object):
         self.append_EOS = append_EOS
 
         u2idx_filepath, idx2u_filepath = f"{dataset_dirpath}/u2idx.data", f"{dataset_dirpath}/idx2u.data"
-        # train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train.data", f"{dataset_dirpath}/valid.data", f"{dataset_dirpath}/test.data"
-        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train_withcontent_withlabel.pkl", f"{dataset_dirpath}/valid_withcontent_withlabel.pkl", f"{dataset_dirpath}/test_withcontent_withlabel.pkl"
+        train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train.data", f"{dataset_dirpath}/valid.data", f"{dataset_dirpath}/test.data"
+        # train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train_withcontent_withlabel.pkl", f"{dataset_dirpath}/valid_withcontent_withlabel.pkl", f"{dataset_dirpath}/test_withcontent_withlabel.pkl"
         if not load_dict:
             self._u2idx = {}
             self._idx2u = []
@@ -209,12 +209,11 @@ class DataConstruct(object):
         total_len = 0
         cascade_data = []
         data_dict = load_pickle(filename)
+        key = True if 'user' in list(data_dict.values())[0] else False
         for tag, cascades in data_dict.items():
-            userlist = [self._u2idx[elem] for elem in cascades['user']]
-            # userlist = [self._u2idx[elem] for elem in cascades['seq']]
-            
-            tslist = list(cascades['ts'])
-            # tslist = list(cascades['interval'])
+            userlist = [self._u2idx[elem] for elem in cascades['user' if key else 'seq']]
+            tslist = list(cascades['ts' if key else 'interval'])
+
             intervallist = list(np.ceil((tslist[-1]-np.array(tslist))/(per_interval*3600)))
             for idx, interval in enumerate(intervallist):
                 if interval >= self.num_interval:
@@ -223,7 +222,7 @@ class DataConstruct(object):
             # contentlist = list(cascades['content'])
             # contentlist = list(cascades['pre'])
 
-            if self.n_component is not None:
+            if self.n_component is not None and 'label' in cascades:
                 labellist = list(cascades['label'])
                 classid2cnt = Counter(labellist)
                 classid = [k for k,c in classid2cnt.most_common(self.n_component) if c>=max(1, int(0.1*len(labellist)))]
@@ -240,7 +239,7 @@ class DataConstruct(object):
                     'ts': tslist,
                     'interval': intervallist,
                     # 'content': contentlist,
-                    'classid': classid if self.n_component is not None else None,
+                    'classid': classid if self.n_component is not None and 'label' in cascades else None,
                 })
         return cascade_data, total_len
     
@@ -285,7 +284,7 @@ class DataConstruct(object):
             # cascade_contents = np.array([
             #     inst['content'] + [PAD_WORD] * (max_len - len(inst['content']))
             #     for inst in insts])
-            if self.n_component is not None:
+            if self.n_component is not None and insts[0]['classid'] is not None:
                 cascade_classids = np.array([
                     inst['classid'] + [-1] * (self.n_component - len(inst['classid']))
                     for inst in insts])
