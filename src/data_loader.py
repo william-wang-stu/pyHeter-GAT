@@ -232,12 +232,12 @@ class DataConstruct(object):
                 total_len += len(userlist)
                 if self.append_EOS:
                     userlist.append(EOS)
-                    # tslist.append(0)
+                    tslist.append(0)
                     intervallist.append(0)
                     # contentlist.append(EOS_WORD)
                 cascade_data.append({
                     'user': userlist,
-                    # 'ts': tslist,
+                    'ts': tslist,
                     'interval': intervallist,
                     # 'content': contentlist,
                     'classid': classid if self.n_component is not None else None,
@@ -276,9 +276,9 @@ class DataConstruct(object):
             cascade_users = np.array([
                 inst['user'] + [PAD] * (max_len - len(inst['user']))
                 for inst in insts])
-            # cascade_tss = np.array([
-            #     inst['ts'] + [0] * (max_len - len(inst['ts']))
-            #     for inst in insts])
+            cascade_tss = np.array([
+                inst['ts'] + [0] * (max_len - len(inst['ts']))
+                for inst in insts])
             cascade_intervals = np.array([
                 inst['interval'] + [0] * (max_len - len(inst['interval']))
                 for inst in insts])
@@ -294,10 +294,10 @@ class DataConstruct(object):
                 cascade_classids_tensor = None
 
             cascade_users_tensor = torch.LongTensor(cascade_users)
-            # cascade_tss_tensor = torch.LongTensor(cascade_tss)
+            cascade_tss_tensor = torch.LongTensor(cascade_tss)
             cascade_intervals_tensor = torch.LongTensor(cascade_intervals)
             # cascade_contents_tensor = torch.LongTensor(cascade_contents)
-            return cascade_users_tensor, cascade_intervals_tensor, cascade_classids_tensor
+            return cascade_users_tensor, cascade_tss_tensor, cascade_intervals_tensor, cascade_classids_tensor
         
         if self._iter_count < self.num_batch:
             batch_idx = self._iter_count
@@ -313,8 +313,8 @@ class DataConstruct(object):
                         
             # seq_users, seq_tss = pad_to_longest(seq_insts)
             # return seq_users, seq_tss
-            seq_users, seq_intervals, seq_classids = pad_to_longest2(seq_insts)
-            return seq_users, seq_intervals, seq_classids
+            seq_users, seq_tss, seq_intervals, seq_classids = pad_to_longest2(seq_insts)
+            return seq_users, seq_tss, seq_intervals, seq_classids
         else:
             if self.shuffle:
                 random.seed(self.seed)

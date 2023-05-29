@@ -143,9 +143,10 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
     # for _, batch in enumerate(data['batch']):
     for _, batch in enumerate(tqdm(data['batch'])):
 
-        cas_users, cas_intervals, cas_classids = batch
+        cas_users, cas_tss, cas_intervals, cas_classids = batch
         if args.cuda:
             cas_users = cas_users.to(args.gpu)
+            cas_tss = cas_tss.to(args.gpu)
             cas_intervals = cas_intervals.to(args.gpu)
         gold_cascade = cas_users[:, 1:]
         
@@ -155,11 +156,11 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         elif args.model == 'heteredgegat':
             pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['user_topic_preference'])
         elif args.model == 'diffusiongat':
-            pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
             pred_cascade, _ = model((cas_users, cas_intervals, None, None))
         elif args.model == 'dhgpntm':
-            pred_cascade = model(cas_users, cas_intervals, None, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, None, data['diffusion_graph'])
         elif args.model == 'forest':
             pred_cascade, _ = model(cas_users)
         elif args.model == 'ndm':
@@ -194,9 +195,10 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
     # for _, batch in enumerate((data['batch'])):
     for _, batch in enumerate(tqdm(data['batch'])):
 
-        cas_users, cas_intervals, cas_classids = batch
+        cas_users, cas_tss, cas_intervals, cas_classids = batch
         if args.cuda:
             cas_users = cas_users.to(args.gpu)
+            cas_tss = cas_tss.to(args.gpu)
             cas_intervals = cas_intervals.to(args.gpu)
         gold_cascade = cas_users[:, 1:]
         
@@ -206,11 +208,11 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         elif args.model == 'heteredgegat':
             pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['user_topic_preference'])
         elif args.model == 'diffusiongat':
-            pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
             pred_cascade, _ = model((cas_users, cas_intervals, None, None))
         elif args.model == 'dhgpntm':
-            pred_cascade = model(cas_users, cas_intervals, None, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, None, data['diffusion_graph'])
         elif args.model == 'forest':
             pred_cascade, _ = model(cas_users)
         elif args.model == 'ndm':
