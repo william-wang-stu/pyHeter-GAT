@@ -34,46 +34,28 @@ class MLP(nn.Module):
     def __init__(self, num_layers, input_dim, hidden_dim, output_dim):
         super(MLP, self).__init__()
 
-        self.linear_or_not = True  # default is linear model
         self.num_layers = num_layers
+        self.linears = torch.nn.ModuleList()
+        self.batch_norms = torch.nn.ModuleList()
 
+        self.linears.append(nn.Linear(input_dim, hidden_dim))
+        for _ in range(num_layers - 2):
+            self.linears.append(nn.Linear(hidden_dim, hidden_dim))
+        self.linears.append(nn.Linear(hidden_dim, output_dim))
 
-        if num_layers < 1:
-            raise ValueError("number of layers should be positive!")
-        elif num_layers == 1:
-            # Linear model
-            self.linear = nn.Linear(input_dim, output_dim)
-        else:
-            # Multi-layer model
-            self.linear_or_not = False
-            self.linears = torch.nn.ModuleList()
-            self.batch_norms = torch.nn.ModuleList()
-
-            self.linears.append(nn.Linear(input_dim, hidden_dim))
-            for layer in range(num_layers - 2):
-                self.linears.append(nn.Linear(hidden_dim, hidden_dim))
-            self.linears.append(nn.Linear(hidden_dim, output_dim))
-
-            for layer in range(num_layers - 1):
-                self.batch_norms.append(nn.BatchNorm1d((hidden_dim)))
-            self.init_weights()
-
-
+        for _ in range(num_layers - 1):
+            self.batch_norms.append(nn.BatchNorm1d((hidden_dim)))
+        self.init_weights()
+    
     def init_weights(self):
         for linear in self.linears:
             init.xavier_normal_(linear.weight)
-
+    
     def forward(self, x):
-        if self.linear_or_not:
-            # If linear model
-            return self.linear(x)
-        else:
-            # If MLP
-            h = x
-            for layer in range(self.num_layers - 1):
-                h = F.relu(self.batch_norms[layer](self.linears[layer](h)))
-            return self.linears[self.num_layers - 1](h)
-
+        h = x
+        for layer in range(self.num_layers-1):
+            h = F.relu(self.batch_norms[layer](self.linears[layer](h)))
+        return self.linears[self.num_layers-1](h)
 
 class GPN(nn.Module):
     def __init__(self, num_layers, num_mlp_layers, input_dim, hidden_dim, output_dim):
@@ -81,26 +63,14 @@ class GPN(nn.Module):
         self.gpn_layers = torch.nn.ModuleList()
         self.batch_norms = torch.nn.ModuleList()
         self.num_layers = num_layers
-        for layer in range(num_layers - 1):
-            if layer == 0:
-                mlp = MLP(num_mlp_layers, input_dim, hidden_dim, hidden_dim)
-            else:
-                mlp = MLP(num_mlp_layers, hidden_dim, hidden_dim, hidden_dim)
-
-            gpn_conv = GPNConv(mlp)
-            self.gpn_layers.append(gpn_conv)
-
-            batch_norm = nn.BatchNorm1d(hidden_dim)
-            self.batch_norms.append(batch_norm)
+        for layer in range(num_layers-1):
+            self.gpn_layers.append(GPNConv(MLP(num_mlp_layers, input_dim if layer==0 else hidden_dim, hidden_dim, hidden_dim)))
+            self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
 
         self.linears_prediction = torch.nn.ModuleList()
         middle_dim = 128
         for layer in range(num_layers):
-            if layer == 0:
-                self.linears_prediction.append(nn.Linear(input_dim, middle_dim))
-            else:
-                self.linears_prediction.append(nn.Linear(hidden_dim, middle_dim))
-
+            self.linears_prediction.append(nn.Linear(input_dim if layer==0 else hidden_dim, middle_dim))
         self.output_layer = nn.Linear(middle_dim, output_dim)
         self.init_weights()
 
@@ -112,22 +82,20 @@ class GPN(nn.Module):
     def forward(self, x, A, weight):
         h = x
         hidden_rep = [h]
-        for layer in range(self.num_layers - 1):
+        for layer in range(self.num_layers-1):
             h = self.gpn_layers[layer](h, A, weight)
             h = self.batch_norms[layer](h)
             h = F.relu(h)
             hidden_rep.append(h)
 
-        output_h = 0
-        for layer, h in enumerate(hidden_rep):
-            if not(layer == 0 or layer == len(hidden_rep)-1):
-                continue
-
-            output_h += self.linears_prediction[layer](h)
-
+        output_h = self.linears_prediction[0](hidden_rep[0]) + self.linears_prediction[-1](hidden_rep[-1])
+        # for layer, h in enumerate(hidden_rep):
+        #     if not(layer == 0 or layer == len(hidden_rep)-1):
+        #         continue
+        #     output_h += self.linears_prediction[layer](h)
+        
         output_h = F.relu(output_h)
         outputs = self.output_layer(output_h)
-
         return outputs
 
 

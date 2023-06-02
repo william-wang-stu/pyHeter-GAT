@@ -5,7 +5,7 @@ import torch
 from torch.nn.parameter import Parameter
 import torch.nn as nn
 import math
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, GATv2Conv
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
@@ -13,7 +13,6 @@ from torch.autograd import Variable
 from .Constants import *
 from .TransformerBlock import TransformerBlock
 from .GPN_model2 import GPN
-# from .GPN_model import GPN
 
 """
     Soft Attention 
@@ -24,11 +23,13 @@ class GraphNN(nn.Module):
         super(GraphNN, self).__init__()
         self.embedding = nn.Embedding(ntoken, ninp, padding_idx=0)
 
-        self.gnn1 = GCNConv(ninp, ninp * 2)
-        self.gnn2 = GCNConv(ninp * 2, ninp)
+        self.gnn1 = GCNConv(ninp, ninp*2)
+        self.gnn2 = GCNConv(ninp*2, ninp)
 
-        self.gpn = GPN(2, 2, ninp, ninp * 2, ninp)
+        # self.gnn1 = GATv2Conv(ninp, ninp, 4, concat=False, edge_dim=1)
+        # self.gnn2 = GATv2Conv(ninp, ninp, 4, concat=False, edge_dim=1)
 
+        # self.gpn = GPN(2, 2, ninp, ninp * 2, ninp)
         self.dropout = nn.Dropout(dropout)
         self.init_weights()
 
@@ -41,14 +42,15 @@ class GraphNN(nn.Module):
         graph_edge_index = graph.edge_index
         graph_weight = graph.edge_weight
 
-        # graph_x_embeddings = self.gnn1(self.embedding.weight, graph_edge_index)
-        # graph_x_embeddings = self.dropout(graph_x_embeddings)
-        # graph_x_embeddings = self.gnn2(graph_x_embeddings, graph_edge_index)
+        graph_x_embeddings = self.gnn1(self.embedding.weight, graph_edge_index)
+        # graph_x_embeddings = self.gnn1(self.embedding.weight, graph_edge_index, graph_weight)
+        graph_x_embeddings = self.dropout(graph_x_embeddings)
+        graph_x_embeddings = self.gnn2(graph_x_embeddings, graph_edge_index)
+        # graph_x_embeddings = self.gnn2(graph_x_embeddings, graph_edge_index, graph_weight)
 
-        graph_x_embeddings = self.gpn(self.embedding.weight, graph_edge_index, graph_weight)
+        # graph_x_embeddings = self.gpn(self.embedding.weight, graph_edge_index, graph_weight)
 
         return graph_x_embeddings
-
 
 class DynamicGraphNN(nn.Module):
     def __init__(self, ntoken, nhid, dropout=0.3):
@@ -65,14 +67,11 @@ class DynamicGraphNN(nn.Module):
 
     def forward(self, diffusion_graph_list):
         res = dict()
-        graph_embeddinng_list = list() 
         for key in sorted(diffusion_graph_list.keys()):
             graph = diffusion_graph_list[key] 
             graph_x_embeddings = self.gnn1(graph)
             graph_x_embeddings = self.drop(graph_x_embeddings)
             graph_x_embeddings = graph_x_embeddings.cpu()
-
-            graph_embeddinng_list.append(graph_x_embeddings)
             res[key] = graph_x_embeddings
         return res 
 
@@ -212,11 +211,11 @@ class DyHGCN_S(nn.Module):
         input = input[:, :-1]
         mask = (input == PAD)
 
-        batch_t = torch.arange(input.size(1)).expand(input.size()).to(input.device)
+        batch_t = torch.arange(input.size(1)).expand(input.size()).to(device)
         order_embed = self.dropout(self.pos_embedding(batch_t))
 
         batch_size, max_len = input.size()
-        dyemb = torch.zeros(batch_size, max_len, self.ninp).to(input.device)
+        dyemb = torch.zeros(batch_size, max_len, self.ninp).to(device)
         input_timestamp = input_timestamp[:, :-1] 
         step_len = 5 
         
@@ -248,20 +247,20 @@ class DyHGCN_S(nn.Module):
 
         dyuser_emb_list = list() 
         for val in sorted(dynamic_node_emb_dict.keys()):
-            dyuser_emb_sub = F.embedding(input, dynamic_node_emb_dict[val]).unsqueeze(2)
+            dyuser_emb_sub = F.embedding(input.to(device), dynamic_node_emb_dict[val].to(device)).unsqueeze(2)
             dyuser_emb_list.append(dyuser_emb_sub)
         dyuser_emb = torch.cat(dyuser_emb_list, dim=2)
 
-        dyemb = self.time_attention(dyemb_timestamp.to(input.device), dyuser_emb, mask)
+        dyemb = self.time_attention(dyemb_timestamp.to(device), dyuser_emb.to(device), mask.to(device))
         dyemb = self.dropout(dyemb) 
 
-        final_embed = torch.cat([dyemb, order_embed], dim=-1) # dynamic_node_emb
-        att_out = self.decoder_attention(final_embed, final_embed, final_embed, mask=mask)
-        att_out = self.dropout(att_out)
+        final_embed = torch.cat([dyemb, order_embed], dim=-1).to(device) # dynamic_node_emb
+        att_out = self.decoder_attention(final_embed.to(device), final_embed.to(device), final_embed.to(device), mask=mask.to(device))
+        att_out = self.dropout(att_out.to(device))
 
-        output = self.linear(att_out)  # (bsz, user_len, |U|)
-        mask = get_previous_user_mask(input, self.user_size)
-        output = output + mask
+        output = self.linear(att_out.to(device))  # (bsz, user_len, |U|)
+        mask = get_previous_user_mask(input.to(device), self.user_size)
+        output = output.to(device) + mask.to(device) 
 
         return output.view(-1, output.size(-1))
 
@@ -286,10 +285,14 @@ class DyHGCN_H(nn.Module):
         self.gnn_diffusion_layer = DynamicGraphNN(ntoken, ninp)
         self.pos_embedding = nn.Embedding(1000, self.pos_dim)
 
-        self.time_attention = TimeAttention_New(time_step_split, self.ninp + self.pos_dim)
-        self.decoder_attention = TransformerBlock(input_size=ninp + self.pos_dim, n_heads=8)
-        self.linear = nn.Linear(ninp + self.pos_dim, ntoken)
+        # self.time_attention = TimeAttention_New(time_step_split, self.ninp + self.pos_dim)
+        self.time_attention = TimeAttention_New(time_step_split, self.ninp)
+        self.decoder_attention = TransformerBlock(input_size=ninp, n_heads=8)
+        # self.decoder_attention = TransformerBlock(input_size=ninp + self.pos_dim, n_heads=8)
+        # self.linear = nn.Linear(ninp + self.pos_dim, ntoken)
+        self.linear = nn.Linear(ninp, ntoken)
         self.init_weights()
+        print(self)
 
     def init_weights(self):
         init.xavier_normal_(self.pos_embedding.weight)
@@ -297,17 +300,13 @@ class DyHGCN_H(nn.Module):
 
     def forward(self, input, input_timestamp, relation_graph, diffusion_graph):
         input = input[:, :-1]
-        mask = (input == PAD)
+        input_timestamp = input_timestamp[:, :-1]
 
-        batch_t = torch.arange(input.size(1)).expand(input.size()).to(input.device)
-        order_embed = self.dropout(self.pos_embedding(batch_t))
-
+        dynamic_node_emb_dict = self.gnn_diffusion_layer(diffusion_graph) #input, input_timestamp, diffusion_graph) 
+        
         batch_size, max_len = input.size()
         dyemb = torch.zeros(batch_size, max_len, self.ninp).to(input.device)
-        input_timestamp = input_timestamp[:, :-1] 
         step_len = 1
-        
-        dynamic_node_emb_dict = self.gnn_diffusion_layer(diffusion_graph) #input, input_timestamp, diffusion_graph) 
         
         latest_timestamp = sorted(dynamic_node_emb_dict.keys())[-1]
         for t in range(0, max_len, step_len):
@@ -333,8 +332,6 @@ class DyHGCN_H(nn.Module):
 
         dyemb = self.dropout(dyemb)
 
-
-
         dyemb_timestamp = torch.zeros(batch_size, max_len).long()
         dynamic_node_emb_dict_time = sorted(dynamic_node_emb_dict.keys())
         dynamic_node_emb_dict_time_dict = dict()
@@ -359,16 +356,17 @@ class DyHGCN_H(nn.Module):
                     break
             dyemb_timestamp[:, t:t + step_len] = res_index
 
-
-
-        final_embed = torch.cat([dyemb, order_embed], dim=-1) # dynamic_node_emb
-
+        mask = (input == PAD)
+        # batch_t = torch.arange(input.size(1)).expand(input.size()).to(input.device)
+        # order_embed = self.dropout(self.pos_embedding(batch_t))
+        # final_embed = torch.cat([dyemb, order_embed], dim=-1) # dynamic_node_emb
+        final_embed = dyemb
         final_embed = self.time_attention(dyemb_timestamp.to(input.device), final_embed, mask)
 
-        att_out = self.decoder_attention(final_embed, final_embed, final_embed, mask=mask)
-
-
-        att_out = self.dropout(att_out)
+        # att_out = self.decoder_attention(final_embed.to(self.device), final_embed.to(self.device), final_embed.to(self.device), mask=mask.to(self.device))
+        # att_out = self.dropout(att_out.to(self.device))
+        att_out = self.dropout(final_embed)
+        
         output = self.linear(att_out)  # (bsz, user_len, |U|)
         mask = get_previous_user_mask(input, self.user_size)
         output = output + mask

@@ -16,6 +16,7 @@ from src.model_pyg import *
 from src.sota.TAN.model import TAN
 from src.sota.TAN.Option import Option
 from src.sota.DHGPNTM.DyHGCN import DyHGCN_H
+# from src.sota.DHGPNTM.DyHGCN2 import DyHGCN_H
 # from src.sota.DHGPNTM.DataConstruct import LoadDynamicHeteGraph
 from src.sota.FOREST.model import RNNModel
 from src.sota.NDM.transformer.Models import Decoder
@@ -37,7 +38,7 @@ logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimesta
 parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--model', type=str, default='diffusiongat', help="available options are ['densegat','heteredgegat']")
+parser.add_argument('--model', type=str, default='dhgpntm', help="available options are ['densegat','heteredgegat']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
@@ -143,9 +144,10 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
     # for _, batch in enumerate(data['batch']):
     for _, batch in enumerate(tqdm(data['batch'])):
 
-        cas_users, cas_intervals, cas_classids = batch
+        cas_users, cas_tss, cas_intervals, cas_classids = batch
         if args.cuda:
             cas_users = cas_users.to(args.gpu)
+            cas_tss = cas_tss.to(args.gpu)
             cas_intervals = cas_intervals.to(args.gpu)
         gold_cascade = cas_users[:, 1:]
         
@@ -155,11 +157,11 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         elif args.model == 'heteredgegat':
             pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['user_topic_preference'])
         elif args.model == 'diffusiongat':
-            pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
             pred_cascade, _ = model((cas_users, cas_intervals, None, None))
         elif args.model == 'dhgpntm':
-            pred_cascade = model(cas_users, cas_intervals, None, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, None, data['diffusion_graph'])
         elif args.model == 'forest':
             pred_cascade, _ = model(cas_users)
         elif args.model == 'ndm':
@@ -194,9 +196,10 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
     # for _, batch in enumerate((data['batch'])):
     for _, batch in enumerate(tqdm(data['batch'])):
 
-        cas_users, cas_intervals, cas_classids = batch
+        cas_users, cas_tss, cas_intervals, cas_classids = batch
         if args.cuda:
             cas_users = cas_users.to(args.gpu)
+            cas_tss = cas_tss.to(args.gpu)
             cas_intervals = cas_intervals.to(args.gpu)
         gold_cascade = cas_users[:, 1:]
         
@@ -206,11 +209,11 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         elif args.model == 'heteredgegat':
             pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['user_topic_preference'])
         elif args.model == 'diffusiongat':
-            pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
             pred_cascade, _ = model((cas_users, cas_intervals, None, None))
         elif args.model == 'dhgpntm':
-            pred_cascade = model(cas_users, cas_intervals, None, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, None, data['diffusion_graph'])
         elif args.model == 'forest':
             pred_cascade, _ = model(cas_users)
         elif args.model == 'ndm':
@@ -305,15 +308,13 @@ def main():
     
     elif args.model == 'diffusiongat':
         diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
-        topk_keys = sorted(diffusion_graph.keys())[4:]
-        diffusion_graph = {key:value for key,value in diffusion_graph.items() if key in topk_keys}
 
         if args.cuda:
             diffusion_graph = {key:value.to(args.gpu) for key, value in diffusion_graph.items()}
         new_d = {'diffusion_graph':diffusion_graph}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = DiffusionGATNetwork(n_feat=64, n_adj=len(diffusion_graph), n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
+        model = DiffusionGATNetwork(n_feat=16, n_adj=len(diffusion_graph), n_units=n_units, n_heads=n_heads, num_interval=8, shape_ret=(n_units[-1],train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout)
 
     elif args.model == 'tan':
@@ -327,8 +328,6 @@ def main():
         # diffusion_graph = LoadDynamicHeteGraph("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer")
         # save_pickle(diffusion_graph, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
         diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
-        topk_keys = sorted(diffusion_graph.keys())[4:]
-        diffusion_graph = {key:value for key,value in diffusion_graph.items() if key in topk_keys}
 
         if args.cuda:
             diffusion_graph = {key:value.to(args.gpu) for key, value in diffusion_graph.items()}
