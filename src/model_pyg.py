@@ -6,12 +6,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 from torch_geometric.nn import GCNConv, GATv2Conv
-from typing import List
 from utils.Constants import PAD
 from src.model import AdditiveAttention
 from src.sota.DHGPNTM.TransformerBlock import TransformerBlock
-from src.sota.DHGPNTM.GPN_model import GPN
-# from src.sota.DHGPNTM.GPN_model2 import GPN
+# from src.sota.DHGPNTM.GPN_model import GPN
 from src.sota.DHGPNTM.DyHGCN import DynamicGraphNN
 # from src.sota.DHGPNTM.DyHGCN import DynamicGraphNN
 
@@ -278,7 +276,7 @@ class HeterEdgeGATNetwork(nn.Module):
     def init_weights(self):
         init.xavier_normal_(self.fc_network.weight)
     
-    def forward(self, cas_uids, cas_intervals, hedge_graphs, cas_classids:torch.Tensor, user_topic_preference:torch.Tensor=None, diffusion_graph=None):
+    def forward(self, cas_uids, cas_intervals, hedge_graphs, cas_classids:torch.Tensor, diffusion_graph_keys=None, user_topic_preference:torch.Tensor=None):
         assert len(hedge_graphs) == len(self.heter_gat_network)
 
         cas_uids = cas_uids[:,:-1]
@@ -325,11 +323,10 @@ class HeterEdgeGATNetwork(nn.Module):
             seq_embs = torch.cat((selected_aware_seq_embs, fusion_seq_embs),dim=1).reshape(bs,ml,-1) # (bs, max_len, (n_comp+1)*D')
         seq_embs = F.dropout(seq_embs, self.dropout)
 
-        # TODO: 用dyemb_ts替代interval
         batch_size, max_len = cas_uids.size()
         step_len = 1
         dyemb_timestamp = torch.zeros(batch_size, max_len).long()
-        dynamic_node_emb_dict_time = sorted(diffusion_graph.keys())
+        dynamic_node_emb_dict_time = sorted(diffusion_graph_keys)
         dynamic_node_emb_dict_time_dict = dict()
         for i, val in enumerate(dynamic_node_emb_dict_time):
             dynamic_node_emb_dict_time_dict[val] = i

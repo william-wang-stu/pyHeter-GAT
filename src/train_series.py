@@ -3,6 +3,11 @@
 # import os
 # sys.path.append(os.path.dirname(os.getcwd()))
 
+import os
+os.environ['NUMEXPR_MAX_THREADS'] = '8'
+os.environ['NUMEXPR_NUM_THREADS'] = '2'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 from lib.log import logger
 from utils.utils import *
 from utils.graph import build_heteredge_mats
@@ -15,9 +20,8 @@ from src.data_loader import DataConstruct
 from src.model_pyg import *
 from src.sota.TAN.model import TAN
 from src.sota.TAN.Option import Option
-from src.sota.DHGPNTM.DyHGCN import DyHGCN_H
-# from src.sota.DHGPNTM.DyHGCN2 import DyHGCN_H
-# from src.sota.DHGPNTM.DataConstruct import LoadDynamicHeteGraph
+# from src.sota.DHGPNTM.DyHGCN import DyHGCN_H
+from src.sota.DHGPNTM.DataConstruct import LoadDynamicHeteGraph
 from src.sota.FOREST.model import RNNModel
 from src.sota.NDM.transformer.Models import Decoder
 import numpy as np
@@ -30,8 +34,6 @@ from torch_geometric.data import Data
 # from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
 
@@ -70,7 +72,7 @@ parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropou
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:6", help="Select GPU")
+parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 
@@ -155,7 +157,7 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['user_topic_preference'])
+            pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['diffusion_graph_keys'], data['user_topic_preference'])
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -207,7 +209,7 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['user_topic_preference'])
+            pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['diffusion_graph_keys'], data['user_topic_preference'])
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -263,7 +265,8 @@ def main():
     # user_ids = read_user_ids(f"{dataset_dirpath}/train_withcontent.data", f"{dataset_dirpath}/valid_withcontent.data", f"{dataset_dirpath}/test_withcontent.data")
     # edges = get_static_subnetwork(user_ids)
     # _, edges = reindex_edges(user_ids, edges)
-    user_edges = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.pkl"))
+    # user_edges = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.pkl"))
+    user_edges = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.data"))
     user_edges = list(zip(*user_edges))
     edges_t = torch.LongTensor(user_edges) # (2,#num_edges)
     weight_t = torch.FloatTensor([1]*edges_t.size(1))
@@ -292,6 +295,11 @@ def main():
             classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
         n_simmat = max(classid2simmat.keys())+1
         hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
+
+        diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
+        diffusion_graph_keys = list(diffusion_graph.keys())
+        if args.cuda:
+            diffusion_graph_keys = diffusion_graph_keys.to(args.gpu)
         
         user_topic_preference = None
         if args.use_topic_preference:
@@ -301,7 +309,7 @@ def main():
             if args.cuda:
                 user_topic_preference = user_topic_preference.to(args.gpu)
         
-        new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference}
+        new_d = {'hedge_graphs':hedge_graphs, 'diffusion_graph_keys':diffusion_graph_keys, 'user_topic_preference':user_topic_preference}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
         model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=n_simmat+1, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_preference=args.use_topic_preference)
@@ -325,8 +333,6 @@ def main():
         model = TAN(opt)
     
     elif args.model == 'dhgpntm':
-        # diffusion_graph = LoadDynamicHeteGraph("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer")
-        # save_pickle(diffusion_graph, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
         diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
 
         if args.cuda:
