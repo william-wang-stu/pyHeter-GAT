@@ -9,9 +9,7 @@ from torch_geometric.nn import GCNConv, GATv2Conv
 from utils.Constants import PAD
 from src.model import AdditiveAttention
 from src.sota.DHGPNTM.TransformerBlock import TransformerBlock
-# from src.sota.DHGPNTM.GPN_model import GPN
 from src.sota.DHGPNTM.DyHGCN import DynamicGraphNN
-# from src.sota.DHGPNTM.DyHGCN import DynamicGraphNN
 
 def get_previous_user_mask(seq, user_size):
     ''' Mask previous activated users.'''
@@ -171,9 +169,9 @@ class DiffusionGATNetwork(nn.Module):
     def init_weights(self):
         init.xavier_normal_(self.fc_network.weight)
     
-    def forward(self, cas_uids, cas_intervals, diffusion_graph):
+    def forward(self, cas_uids, cas_tss, diffusion_graph):
         cas_uids = cas_uids[:,:-1]
-        cas_intervals = cas_intervals[:,:-1]
+        cas_tss = cas_tss[:,:-1]
 
         dynamic_node_emb_dict = self.gnn_diffusion_layer(diffusion_graph) #input, input_timestamp, diffusion_graph) 
         
@@ -184,7 +182,7 @@ class DiffusionGATNetwork(nn.Module):
         latest_timestamp = sorted(dynamic_node_emb_dict.keys())[-1]
         for t in range(0, max_len, step_len):
             try:
-                la_timestamp = torch.max(cas_intervals[:, t:t+step_len]).item()
+                la_timestamp = torch.max(cas_tss[:, t:t+step_len]).item()
                 if la_timestamp < 1:
                     break 
                 latest_timestamp = la_timestamp 
@@ -213,7 +211,7 @@ class DiffusionGATNetwork(nn.Module):
         latest_timestamp = dynamic_node_emb_dict_time[-1]
         for t in range(0, max_len, step_len):
             try:
-                la_timestamp = torch.max(cas_intervals[:, t:t + step_len]).item()
+                la_timestamp = torch.max(cas_tss[:, t:t + step_len]).item()
                 if la_timestamp < 1:
                     break
                 latest_timestamp = la_timestamp
@@ -245,7 +243,7 @@ class DiffusionGATNetwork(nn.Module):
 
 class HeterEdgeGATNetwork(nn.Module):
     def __init__(self, n_feat, n_adj, n_comp, n_units, n_heads, num_interval, shape_ret,
-        attn_dropout, dropout, instance_normalization=False, use_topic_preference=False
+        attn_dropout, dropout, instance_normalization=False, use_topic_pref=False,
     ):
         """
         shape_ret: (n_units[-1], #user)
@@ -254,7 +252,6 @@ class HeterEdgeGATNetwork(nn.Module):
 
         self.dropout = dropout
         self.inst_norm = instance_normalization
-        self.use_topic_pref = use_topic_preference
         self.user_size = shape_ret[1]
         self.user_emb = nn.Embedding(self.user_size, n_feat, padding_idx=PAD)
         self.pos_emb_dim = 8
@@ -266,7 +263,7 @@ class HeterEdgeGATNetwork(nn.Module):
         #     GPN(num_layers=2, num_mlp_layers=2, input_dim=n_feat, hidden_dim=n_units[0], output_dim=n_units[-1])
         #     for _ in range(n_adj)
         # ])
-        if not self.use_topic_pref:
+        if not use_topic_pref:
             self.additive_attention = AdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
         self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=shape_ret[0]*(n_comp+1)+self.pos_emb_dim)
         self.decoder_attention = TransformerBlock(input_size=shape_ret[0]*(n_comp+1)+self.pos_emb_dim, n_heads=8)
@@ -276,11 +273,13 @@ class HeterEdgeGATNetwork(nn.Module):
     def init_weights(self):
         init.xavier_normal_(self.fc_network.weight)
     
-    def forward(self, cas_uids, cas_intervals, hedge_graphs, cas_classids:torch.Tensor, diffusion_graph_keys=None, user_topic_preference:torch.Tensor=None):
+    def forward(self, cas_uids, cas_intervals, cas_classids:torch.Tensor, hedge_graphs, cas_tss=None, diffusion_graph_keys=None, user_topic_preference:torch.Tensor=None):
         assert len(hedge_graphs) == len(self.heter_gat_network)
 
         cas_uids = cas_uids[:,:-1]
         cas_intervals = cas_intervals[:,:-1]
+        if cas_tss is not None:
+            cas_tss = cas_tss[:,:-1]
 
         user_emb = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
         heter_user_embs = []
@@ -302,7 +301,7 @@ class HeterEdgeGATNetwork(nn.Module):
         n_comp, d = selected_aware_seq_embs.size()[2:]
         selected_aware_seq_embs = selected_aware_seq_embs.view(-1,n_comp,d) # (bs*max_len, n_comp, D')
         
-        if not self.use_topic_pref:
+        if user_topic_preference is None:
             user_seq_embs = F.embedding(cas_uids, user_emb)
             user_seq_embs = user_seq_embs.view(-1,user_seq_embs.size(-1)) # (bs*max_len, D)
             assert user_seq_embs.size(0) == selected_aware_seq_embs.size(0)
@@ -323,42 +322,44 @@ class HeterEdgeGATNetwork(nn.Module):
             seq_embs = torch.cat((selected_aware_seq_embs, fusion_seq_embs),dim=1).reshape(bs,ml,-1) # (bs, max_len, (n_comp+1)*D')
         seq_embs = F.dropout(seq_embs, self.dropout)
 
-        batch_size, max_len = cas_uids.size()
-        step_len = 1
-        dyemb_timestamp = torch.zeros(batch_size, max_len).long()
-        dynamic_node_emb_dict_time = sorted(diffusion_graph_keys)
-        dynamic_node_emb_dict_time_dict = dict()
-        for i, val in enumerate(dynamic_node_emb_dict_time):
-            dynamic_node_emb_dict_time_dict[val] = i
-        latest_timestamp = dynamic_node_emb_dict_time[-1]
-        for t in range(0, max_len, step_len):
-            try:
-                la_timestamp = torch.max(cas_intervals[:, t:t + step_len]).item()
-                if la_timestamp < 1:
-                    break
-                latest_timestamp = la_timestamp
-            except Exception:
-                pass
+        if diffusion_graph_keys is not None:
+            batch_size, max_len = cas_uids.size()
+            step_len = 1
+            dyemb_timestamp = torch.zeros(batch_size, max_len).long()
+            dynamic_node_emb_dict_time = sorted(diffusion_graph_keys)
+            dynamic_node_emb_dict_time_dict = dict()
+            for i, val in enumerate(dynamic_node_emb_dict_time):
+                dynamic_node_emb_dict_time_dict[val] = i
+            latest_timestamp = dynamic_node_emb_dict_time[-1]
+            for t in range(0, max_len, step_len):
+                try:
+                    la_timestamp = torch.max(cas_tss[:, t:t + step_len]).item()
+                    if la_timestamp < 1:
+                        break
+                    latest_timestamp = la_timestamp
+                except Exception:
+                    pass
 
-            res_index = len(dynamic_node_emb_dict_time_dict) - 1
-            for i, val in enumerate(dynamic_node_emb_dict_time_dict.keys()):
-                if val <= latest_timestamp:
-                    res_index = i
-                    continue
-                else:
-                    break
-            dyemb_timestamp[:, t:t + step_len] = res_index
+                res_index = len(dynamic_node_emb_dict_time_dict) - 1
+                for i, val in enumerate(dynamic_node_emb_dict_time_dict.keys()):
+                    if val <= latest_timestamp:
+                        res_index = i
+                        continue
+                    else:
+                        break
+                dyemb_timestamp[:, t:t + step_len] = res_index
 
         batch_t = torch.arange(cas_uids.size(1)).expand(cas_uids.size()).to(cas_uids.device)
         pos_embs = F.dropout(self.pos_emb(batch_t), self.dropout)
 
         mask = (cas_uids == PAD)
-        # seq_embs = self.time_attention(cas_intervals, torch.cat([seq_embs, pos_embs], dim=-1), mask)
-        seq_embs = self.time_attention(dyemb_timestamp.to(cas_uids.device), torch.cat([seq_embs, pos_embs], dim=-1), mask)
+        if diffusion_graph_keys is not None:
+            seq_embs = self.time_attention(dyemb_timestamp.to(cas_uids.device), torch.cat([seq_embs, pos_embs], dim=-1), mask)
+        else:
+            seq_embs = self.time_attention(cas_intervals, torch.cat([seq_embs, pos_embs], dim=-1), mask)
         seq_embs = F.dropout(seq_embs, self.dropout)
 
         seq_embs = self.decoder_attention(seq_embs, seq_embs, seq_embs, mask)
-
         output = self.fc_network(seq_embs) # (bs, max_len, |V|)
         mask = get_previous_user_mask(cas_uids, self.user_size)
         output = output + mask

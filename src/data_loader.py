@@ -122,7 +122,6 @@ class DataConstruct(object):
 
         u2idx_filepath, idx2u_filepath = f"{dataset_dirpath}/u2idx.data", f"{dataset_dirpath}/idx2u.data"
         train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train.data", f"{dataset_dirpath}/valid.data", f"{dataset_dirpath}/test.data"
-        # train_data_filepath, valid_data_filepath, test_data_filepath = f"{dataset_dirpath}/train_withcontent_withlabel.pkl", f"{dataset_dirpath}/valid_withcontent_withlabel.pkl", f"{dataset_dirpath}/test_withcontent_withlabel.pkl"
         if not load_dict:
             self._u2idx = {}
             self._idx2u = []
@@ -209,6 +208,7 @@ class DataConstruct(object):
         total_len = 0
         cascade_data = []
         data_dict = load_pickle(filename)
+        
         key = True if 'user' in list(data_dict.values())[0] else False
         for tag, cascades in data_dict.items():
             userlist = [self._u2idx[elem] for elem in cascades['user' if key else 'seq']]
@@ -219,13 +219,15 @@ class DataConstruct(object):
                 if interval >= self.num_interval:
                     intervallist[idx] = self.num_interval-1
             
-            # contentlist = list(cascades['content'])
-            # contentlist = list(cascades['pre'])
+            # contentlist = list(cascades['content' if key else 'pre'])
 
-            if self.n_component is not None and 'label' in cascades:
+            if self.n_component is not None:
+                assert 'label' in cascades
                 labellist = list(cascades['label'])
                 classid2cnt = Counter(labellist)
                 classid = [k for k,c in classid2cnt.most_common(self.n_component) if c>=max(1, int(0.1*len(labellist)))]
+            else:
+                classid = None
 
             if len(userlist) >= min_user and len(userlist) <= max_user:
                 total_len += len(userlist)
@@ -239,7 +241,7 @@ class DataConstruct(object):
                     'ts': tslist,
                     'interval': intervallist,
                     # 'content': contentlist,
-                    'classid': classid if self.n_component is not None and 'label' in cascades else None,
+                    'classid': classid,
                 })
         return cascade_data, total_len
     

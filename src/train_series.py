@@ -20,7 +20,7 @@ from src.data_loader import DataConstruct
 from src.model_pyg import *
 from src.sota.TAN.model import TAN
 from src.sota.TAN.Option import Option
-# from src.sota.DHGPNTM.DyHGCN import DyHGCN_H
+from src.sota.DHGPNTM.DyHGCN import DyHGCN_H
 from src.sota.DHGPNTM.DataConstruct import LoadDynamicHeteGraph
 from src.sota.FOREST.model import RNNModel
 from src.sota.NDM.transformer.Models import Decoder
@@ -40,7 +40,7 @@ logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimesta
 parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--model', type=str, default='dhgpntm', help="available options are ['densegat','heteredgegat']")
+parser.add_argument('--model', type=str, default='heteredgegat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
@@ -143,8 +143,8 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
     model.train()
 
     loss, correct, total = 0., 0., 0.
-    # for _, batch in enumerate(data['batch']):
-    for _, batch in enumerate(tqdm(data['batch'])):
+    for _, batch in enumerate(data['batch']):
+    # for _, batch in enumerate(tqdm(data['batch'])):
 
         cas_users, cas_tss, cas_intervals, cas_classids = batch
         if args.cuda:
@@ -157,7 +157,7 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['diffusion_graph_keys'], data['user_topic_preference'])
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss, data['diffusion_graph_keys'], data['user_topic_preference'])
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -195,8 +195,8 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
     for k in k_list:
         scores[f'hits@{k}'] = 0
         scores[f'map@{k}'] = 0
-    # for _, batch in enumerate((data['batch'])):
-    for _, batch in enumerate(tqdm(data['batch'])):
+    for _, batch in enumerate((data['batch'])):
+    # for _, batch in enumerate(tqdm(data['batch'])):
 
         cas_users, cas_tss, cas_intervals, cas_classids = batch
         if args.cuda:
@@ -209,7 +209,7 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, data['hedge_graphs'], cas_classids, data['diffusion_graph_keys'], data['user_topic_preference'])
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss, data['diffusion_graph_keys'], data['user_topic_preference'])
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -262,10 +262,10 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
 def main():
     # torch.set_num_threads(4)
 
+    dataset_dirpath = f"{DATA_ROOTPATH}/Weibo-Aminer"
     # user_ids = read_user_ids(f"{dataset_dirpath}/train_withcontent.data", f"{dataset_dirpath}/valid_withcontent.data", f"{dataset_dirpath}/test_withcontent.data")
     # edges = get_static_subnetwork(user_ids)
     # _, edges = reindex_edges(user_ids, edges)
-    # user_edges = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.pkl"))
     user_edges = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.data"))
     user_edges = list(zip(*user_edges))
     edges_t = torch.LongTensor(user_edges) # (2,#num_edges)
@@ -274,13 +274,12 @@ def main():
     if args.cuda:
         graph = graph.to(args.gpu)
 
-    dataset_dirpath = f"{DATA_ROOTPATH}/Weibo-Aminer"
     n_units = [int(x) for x in args.hidden_units.strip().split(",")]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
 
-    train_data = DataConstruct(dataset_dirpath=dataset_dirpath, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=0, load_dict=False)
-    valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=1, load_dict=True)
-    test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, n_component=args.n_component, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, data_type=2, load_dict=True)
+    train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=0, load_dict=False)
+    valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=1, load_dict=True)
+    test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=2, load_dict=True)
 
     train_d = {'batch': train_data}; valid_d = {'batch': valid_data}; test_d = {'batch': test_data}
 
@@ -296,14 +295,12 @@ def main():
         n_simmat = max(classid2simmat.keys())+1
         hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
 
-        diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
+        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion_graph.data"))
         diffusion_graph_keys = list(diffusion_graph.keys())
-        if args.cuda:
-            diffusion_graph_keys = diffusion_graph_keys.to(args.gpu)
         
         user_topic_preference = None
         if args.use_topic_preference:
-            user_topic_preference = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/llm/user_topic_pref_cnt.pkl")
+            user_topic_preference = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/user_topic_pref_cnt.pkl"))
             # -1 use mean vector
             user_topic_preference = torch.cat((user_topic_preference, torch.mean(user_topic_preference, dim=1).view(-1,1)), dim=1)
             if args.cuda:
@@ -311,18 +308,20 @@ def main():
         
         new_d = {'hedge_graphs':hedge_graphs, 'diffusion_graph_keys':diffusion_graph_keys, 'user_topic_preference':user_topic_preference}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
+
         model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=n_simmat+1, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
-            attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_preference=args.use_topic_preference)
+            attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_pref=args.use_topic_preference)
     
     elif args.model == 'diffusiongat':
-        diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
-
+        # diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, "Weibo-Aminer"))
+        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion_graph.data"))
         if args.cuda:
             diffusion_graph = {key:value.to(args.gpu) for key, value in diffusion_graph.items()}
+        
         new_d = {'diffusion_graph':diffusion_graph}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = DiffusionGATNetwork(n_feat=16, n_adj=len(diffusion_graph), n_units=n_units, n_heads=n_heads, num_interval=8, shape_ret=(n_units[-1],train_data.user_size), 
+        model = DiffusionGATNetwork(n_feat=64, n_adj=None, n_units=None, n_heads=None, num_interval=len(diffusion_graph), shape_ret=(n_units[-1],train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout)
 
     elif args.model == 'tan':
@@ -333,13 +332,15 @@ def main():
         model = TAN(opt)
     
     elif args.model == 'dhgpntm':
-        diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.pkl")
-
+        # diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, "Weibo-Aminer"))
+        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion_graph.data"))
         if args.cuda:
             diffusion_graph = {key:value.to(args.gpu) for key, value in diffusion_graph.items()}
+        
         new_d = {'diffusion_graph':diffusion_graph}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
-        model = DyHGCN_H(train_data.user_size, 16)
+
+        model = DyHGCN_H(train_data.user_size, 64)
     
     elif args.model == 'forest':
         model = RNNModel('GRUCell', train_data.user_size, 64, 64)
@@ -359,7 +360,7 @@ def main():
         model = model.to(args.gpu)
         loss_func = loss_func.to(args.gpu)
     
-    tensorboard_log_dir = 'tensorboard-series/tensorboard_%s_epochs%d' % (args.tensorboard_log, args.epochs)
+    tensorboard_log_dir = '%s/tensorboard-series/tensorboard_%s_epochs%d' % (os.path.dirname(os.path.abspath(__file__)), args.tensorboard_log, args.epochs)
     os.makedirs(tensorboard_log_dir, exist_ok=True)
     shutil.rmtree(tensorboard_log_dir)
     writer = SummaryWriter(tensorboard_log_dir)

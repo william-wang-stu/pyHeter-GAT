@@ -12,8 +12,8 @@ import torch.nn.init as init
 from torch.autograd import Variable
 from .Constants import *
 from .TransformerBlock import TransformerBlock
-from .GPN_model2 import GPN
-# from .GPN_model import GPN
+# from .GPN_model2 import GPN
+from .GPN_model import GPN
 
 """
     Soft Attention 
