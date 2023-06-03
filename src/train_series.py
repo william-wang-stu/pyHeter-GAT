@@ -321,7 +321,7 @@ def main():
         new_d = {'diffusion_graph':diffusion_graph}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = DiffusionGATNetwork(n_feat=64, n_adj=None, n_units=None, n_heads=None, num_interval=len(diffusion_graph), shape_ret=(n_units[-1],train_data.user_size), 
+        model = DiffusionGATNetwork(n_feat=64, n_adj=None, n_units=None, n_heads=None, num_interval=len(diffusion_graph), shape_ret=(64,train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout)
 
     elif args.model == 'tan':

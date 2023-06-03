@@ -149,9 +149,10 @@ class DiffusionGATNetwork(nn.Module):
         """
         super(DiffusionGATNetwork, self).__init__()
 
-        self.dropout = dropout
+        # self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
         self.user_size = shape_ret[1]
-        self.user_emb = nn.Embedding(self.user_size, n_feat, padding_idx=PAD)
+        # self.user_emb = nn.Embedding(self.user_size, n_feat, padding_idx=PAD)
         self.gnn_diffusion_layer = DynamicGraphNN(self.user_size, shape_ret[0])
         self.ninp = shape_ret[0]
         self.pos_emb_dim = 8
@@ -167,6 +168,8 @@ class DiffusionGATNetwork(nn.Module):
         self.init_weights()
     
     def init_weights(self):
+        # init.xavier_normal_(self.user_emb.weight)
+        init.xavier_normal_(self.pos_emb.weight)
         init.xavier_normal_(self.fc_network.weight)
     
     def forward(self, cas_uids, cas_tss, diffusion_graph):
@@ -201,7 +204,8 @@ class DiffusionGATNetwork(nn.Module):
             graph_dynamic_embeddings = dynamic_node_emb_dict[his_timestamp]
             dyemb[:, t:t+step_len, :] = F.embedding(cas_uids[:, t:t+step_len], graph_dynamic_embeddings.to(cas_uids.device))
 
-        dyemb = F.dropout(dyemb, self.dropout)
+        # dyemb = F.dropout(dyemb, self.dropout)
+        dyemb = self.dropout(dyemb)
 
         dyemb_timestamp = torch.zeros(batch_size, max_len).long()
         dynamic_node_emb_dict_time = sorted(dynamic_node_emb_dict.keys())
@@ -229,12 +233,15 @@ class DiffusionGATNetwork(nn.Module):
 
         mask = (cas_uids == PAD)
         batch_t = torch.arange(cas_uids.size(1)).expand(cas_uids.size()).to(cas_uids.device)
-        pos_embs = F.dropout(self.pos_emb(batch_t), self.dropout)
+        # pos_embs = F.dropout(self.pos_emb(batch_t), self.dropout)
+        pos_embs = self.dropout(self.pos_emb(batch_t))
 
         seq_embs = self.time_attention(dyemb_timestamp.to(cas_uids.device), torch.cat([dyemb, pos_embs], dim=-1), mask)
-        seq_embs = F.dropout(seq_embs, self.dropout)
+        # seq_embs = F.dropout(seq_embs, self.dropout)
+        # seq_embs = self.dropout(seq_embs)
 
         seq_embs = self.decoder_attention(seq_embs, seq_embs, seq_embs, mask)
+        seq_embs = self.dropout(seq_embs)
 
         output = self.fc_network(seq_embs) # (bs, max_len, |V|)
         mask = get_previous_user_mask(cas_uids, self.user_size)

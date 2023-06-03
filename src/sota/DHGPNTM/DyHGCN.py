@@ -282,7 +282,7 @@ class DyHGCN_H(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.drop_timestamp = nn.Dropout(dropout)
 
-        self.gnn_layer = GraphNN(ntoken, ninp)
+        # self.gnn_layer = GraphNN(ntoken, ninp)
         self.gnn_diffusion_layer = DynamicGraphNN(ntoken, ninp)
         self.pos_embedding = nn.Embedding(1000, self.pos_dim)
 
