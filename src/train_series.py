@@ -73,7 +73,7 @@ parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropou
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
+parser.add_argument('--gpu', type=str, default="cuda:7", help="Select GPU")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 
@@ -158,7 +158,7 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, cas_classids, graph, data['diffusion_graph'], cas_tss,)
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss,)
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -291,19 +291,12 @@ def main():
     
     elif args.model == 'heteredgegat':
         # classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/classid2simmat_windowsize{args.window_size}.pkl"))
-        # if args.cuda:
-        #     classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
-        # n_simmat = max(classid2simmat.keys())+1
-        # hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
-        hedge_graphs = None
-
-        # diffusion_graph_keys = None
-        # num_interval = args.n_interval
-        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph.pkl"))
+        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph.data"))
         if args.cuda:
-            diffusion_graph = {k:v.to(args.gpu) for k,v in diffusion_graph.items()}
-        num_interval = len(diffusion_graph)
-        
+            classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
+        n_simmat = max(classid2simmat.keys())+1
+        hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
+
         user_topic_preference = None
         if args.use_topic_preference:
             user_topic_preference = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/user_topic_pref_cnt.pkl"))
@@ -312,10 +305,12 @@ def main():
             if args.cuda:
                 user_topic_preference = user_topic_preference.to(args.gpu)
         
-        new_d = {'hedge_graphs':hedge_graphs, 'diffusion_graph':diffusion_graph, 'user_topic_preference':user_topic_preference}
+        new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=num_interval, n_comp=args.n_component, num_interval=num_interval, shape_ret=(n_units[-1],train_data.user_size), 
+        # model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=num_interval, n_comp=args.n_component, num_interval=num_interval, shape_ret=(n_units[-1],train_data.user_size), 
+        #     attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_pref=args.use_topic_preference)
+        model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_pref=args.use_topic_preference)
     
     elif args.model == 'diffusiongat':
