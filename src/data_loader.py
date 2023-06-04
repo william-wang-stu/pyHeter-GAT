@@ -209,17 +209,16 @@ class DataConstruct(object):
         cascade_data = []
         data_dict = load_pickle(filename)
         
-        key = True if 'user' in list(data_dict.values())[0] else False
         for tag, cascades in data_dict.items():
-            userlist = [self._u2idx[elem] for elem in cascades['user' if key else 'seq']]
-            tslist = list(cascades['ts' if key else 'interval'])
+            userlist = [self._u2idx[elem] for elem in cascades['user']]
+            tslist = list(cascades['ts'])
 
             intervallist = list(np.ceil((tslist[-1]-np.array(tslist))/(per_interval*3600)))
             for idx, interval in enumerate(intervallist):
                 if interval >= self.num_interval:
                     intervallist[idx] = self.num_interval-1
             
-            # contentlist = list(cascades['content' if key else 'pre'])
+            # contentlist = list(cascades['content'])
 
             if self.n_component is not None:
                 assert 'label' in cascades

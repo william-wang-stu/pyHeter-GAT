@@ -40,6 +40,7 @@ logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimesta
 parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
+parser.add_argument('--dataset', type=str, default='Weibo-Aminer', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
 parser.add_argument('--model', type=str, default='heteredgegat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
@@ -143,8 +144,8 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
     model.train()
 
     loss, correct, total = 0., 0., 0.
-    for _, batch in enumerate(data['batch']):
-    # for _, batch in enumerate(tqdm(data['batch'])):
+    # for _, batch in enumerate(data['batch']):
+    for _, batch in enumerate(tqdm(data['batch'])):
 
         cas_users, cas_tss, cas_intervals, cas_classids = batch
         if args.cuda:
@@ -157,7 +158,7 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss, data['diffusion_graph_keys'], data['user_topic_preference'])
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, graph, data['diffusion_graph'], cas_tss,)
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -262,11 +263,11 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
 def main():
     # torch.set_num_threads(4)
 
-    dataset_dirpath = f"{DATA_ROOTPATH}/Weibo-Aminer"
+    dataset_dirpath = f"{DATA_ROOTPATH}/{args.dataset}"
     # user_ids = read_user_ids(f"{dataset_dirpath}/train_withcontent.data", f"{dataset_dirpath}/valid_withcontent.data", f"{dataset_dirpath}/test_withcontent.data")
     # edges = get_static_subnetwork(user_ids)
     # _, edges = reindex_edges(user_ids, edges)
-    user_edges = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/edges.data"))
+    user_edges = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/edges.data"))
     user_edges = list(zip(*user_edges))
     edges_t = torch.LongTensor(user_edges) # (2,#num_edges)
     weight_t = torch.FloatTensor([1]*edges_t.size(1))
@@ -277,7 +278,7 @@ def main():
     n_units = [int(x) for x in args.hidden_units.strip().split(",")]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
 
-    train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=0, load_dict=False)
+    train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=0, load_dict=True)
     valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=1, load_dict=True)
     test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=2, load_dict=True)
 
@@ -289,32 +290,37 @@ def main():
             attn_dropout=args.attn_dropout, dropout=args.dropout)
     
     elif args.model == 'heteredgegat':
-        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"Weibo-Aminer/llm/classid2simmat_windowsize{args.window_size}.pkl"))
-        if args.cuda:
-            classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
-        n_simmat = max(classid2simmat.keys())+1
-        hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
+        # classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/classid2simmat_windowsize{args.window_size}.pkl"))
+        # if args.cuda:
+        #     classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
+        # n_simmat = max(classid2simmat.keys())+1
+        # hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
+        hedge_graphs = None
 
-        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion_graph.data"))
-        diffusion_graph_keys = list(diffusion_graph.keys())
+        # diffusion_graph_keys = None
+        # num_interval = args.n_interval
+        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph.pkl"))
+        if args.cuda:
+            diffusion_graph = {k:v.to(args.gpu) for k,v in diffusion_graph.items()}
+        num_interval = len(diffusion_graph)
         
         user_topic_preference = None
         if args.use_topic_preference:
-            user_topic_preference = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/llm/user_topic_pref_cnt.pkl"))
+            user_topic_preference = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/user_topic_pref_cnt.pkl"))
             # -1 use mean vector
             user_topic_preference = torch.cat((user_topic_preference, torch.mean(user_topic_preference, dim=1).view(-1,1)), dim=1)
             if args.cuda:
                 user_topic_preference = user_topic_preference.to(args.gpu)
         
-        new_d = {'hedge_graphs':hedge_graphs, 'diffusion_graph_keys':diffusion_graph_keys, 'user_topic_preference':user_topic_preference}
+        new_d = {'hedge_graphs':hedge_graphs, 'diffusion_graph':diffusion_graph, 'user_topic_preference':user_topic_preference}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=n_simmat+1, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
+        model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=num_interval, n_comp=args.n_component, num_interval=num_interval, shape_ret=(n_units[-1],train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_pref=args.use_topic_preference)
     
     elif args.model == 'diffusiongat':
-        # diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, "Weibo-Aminer"))
-        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion_graph.data"))
+        # diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, args.dataset))
+        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
         if args.cuda:
             diffusion_graph = {key:value.to(args.gpu) for key, value in diffusion_graph.items()}
         
@@ -332,8 +338,8 @@ def main():
         model = TAN(opt)
     
     elif args.model == 'dhgpntm':
-        # diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, "Weibo-Aminer"))
-        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, "Weibo-Aminer/diffusion_graph.data"))
+        # diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, args.dataset))
+        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
         if args.cuda:
             diffusion_graph = {key:value.to(args.gpu) for key, value in diffusion_graph.items()}
         
