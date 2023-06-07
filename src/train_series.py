@@ -71,9 +71,9 @@ parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight dec
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
 parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropout rate (1 - keep probability).')
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
-parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
+parser.add_argument('--heads', type=str, default="4,4", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:7", help="Select GPU")
+parser.add_argument('--gpu', type=str, default="cuda:6", help="Select GPU")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 
@@ -144,8 +144,8 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
     model.train()
 
     loss, correct, total = 0., 0., 0.
-    # for _, batch in enumerate(data['batch']):
-    for _, batch in enumerate(tqdm(data['batch'])):
+    for _, batch in enumerate(data['batch']):
+    # for _, batch in enumerate(tqdm(data['batch'])):
 
         cas_users, cas_tss, cas_intervals, cas_classids = batch
         if args.cuda:
@@ -158,7 +158,7 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss,)
+            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss,)
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -210,7 +210,7 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss, data['diffusion_graph_keys'], data['user_topic_preference'])
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss,)
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -284,14 +284,25 @@ def main():
 
     train_d = {'batch': train_data}; valid_d = {'batch': valid_data}; test_d = {'batch': test_data}
 
+    vertex_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/vertex_feature_user{train_data.user_size}.npy"))
+    three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/three_sort_feature_user{train_data.user_size}.npy"))
+    deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/deepwalk_emb_user{train_data.user_size}.data"), max_idx=train_data.user_size-1)
+    user_side_emb = torch.cat([torch.FloatTensor(vertex_feat),torch.FloatTensor(deepwalk_feat),torch.FloatTensor(three_sort_feat),],dim=1)
+    if args.cuda:
+        user_side_emb = user_side_emb.to(args.gpu)
+    
+    new_d = {'user_side_emb': user_side_emb}
+    train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
+
     # TODO: decide on n_feat
     if args.model == 'densegat':
-        model = BasicGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
+        model = BasicGATNetwork(n_feat=16, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout)
     
     elif args.model == 'heteredgegat':
         # classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/classid2simmat_windowsize{args.window_size}.pkl"))
-        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph.data"))
+        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph_usetrain.data"))
+        # classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph_usefull.data"))
         if args.cuda:
             classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
         n_simmat = max(classid2simmat.keys())+1
@@ -308,9 +319,7 @@ def main():
         new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        # model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=num_interval, n_comp=args.n_component, num_interval=num_interval, shape_ret=(n_units[-1],train_data.user_size), 
-        #     attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_pref=args.use_topic_preference)
-        model = HeterEdgeGATNetwork(n_feat=64, n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
+        model = HeterEdgeGATNetwork(n_feat=user_side_emb.size(1), n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_pref=args.use_topic_preference)
     
     elif args.model == 'diffusiongat':
