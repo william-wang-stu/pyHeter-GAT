@@ -270,7 +270,7 @@ class DyHGCN_S(nn.Module):
 
 class DyHGCN_H(nn.Module):
 
-    def __init__(self, user_size, d_word_vec, dropout=0.3):
+    def __init__(self, user_size, d_word_vec, n_interval, dropout=0.3):
         super(DyHGCN_H, self).__init__()
         ntoken = user_size
         ninp = d_word_vec
@@ -286,7 +286,7 @@ class DyHGCN_H(nn.Module):
         self.gnn_diffusion_layer = DynamicGraphNN(ntoken, ninp)
         self.pos_embedding = nn.Embedding(1000, self.pos_dim)
 
-        self.time_attention = TimeAttention_New(time_step_split, self.ninp + self.pos_dim)
+        self.time_attention = TimeAttention_New(n_interval, self.ninp + self.pos_dim)
         self.decoder_attention = TransformerBlock(input_size=ninp + self.pos_dim, n_heads=8)
         self.linear = nn.Linear(ninp + self.pos_dim, ntoken)
         self.init_weights()
@@ -295,75 +295,79 @@ class DyHGCN_H(nn.Module):
         init.xavier_normal_(self.pos_embedding.weight)
         init.xavier_normal_(self.linear.weight)
 
-    def forward(self, input, input_timestamp, relation_graph, diffusion_graph):
-        input = input[:, :-1]
+    def forward(self, input, input_timestamp, input_interval, relation_graph, diffusion_graph):
+        input = input[:,:-1]
+        input_interval = input_interval[:,:-1]
+        input_timestamp = input_timestamp[:,:-1] 
         mask = (input == PAD)
 
         batch_t = torch.arange(input.size(1)).expand(input.size()).to(input.device)
         order_embed = self.dropout(self.pos_embedding(batch_t))
 
-        batch_size, max_len = input.size()
-        dyemb = torch.zeros(batch_size, max_len, self.ninp).to(input.device)
-        input_timestamp = input_timestamp[:, :-1] 
-        step_len = 1
+        # batch_size, max_len = input.size()
+        # dyemb = torch.zeros(batch_size, max_len, self.ninp).to(input.device)
+        # step_len = 1
         
         dynamic_node_emb_dict = self.gnn_diffusion_layer(diffusion_graph) #input, input_timestamp, diffusion_graph) 
         
         latest_timestamp = sorted(dynamic_node_emb_dict.keys())[-1]
-        for t in range(0, max_len, step_len):
-            try:
-                la_timestamp = torch.max(input_timestamp[:, t:t+step_len]).item()
-                if la_timestamp < 1:
-                    break 
-                latest_timestamp = la_timestamp 
-            except Exception:
-                # print (input_timestamp[:, t:t+step_len])
-                pass 
+        graph_dynamic_embeddings = dynamic_node_emb_dict[latest_timestamp]
+        dyemb = F.embedding(input, graph_dynamic_embeddings.to(input.device))
+        # for t in range(0, max_len, step_len):
+        #     try:
+        #         la_timestamp = torch.max(input_timestamp[:, t:t+step_len]).item()
+        #         if la_timestamp < 1:
+        #             break 
+        #         latest_timestamp = la_timestamp 
+        #     except Exception:
+        #         # print (input_timestamp[:, t:t+step_len])
+        #         pass 
 
-            his_timestamp = sorted(dynamic_node_emb_dict.keys())[-1]
-            for x in sorted(dynamic_node_emb_dict.keys()):
-                if x <= latest_timestamp:
-                    his_timestamp = x
-                    continue
-                else:
-                    break 
+        #     his_timestamp = sorted(dynamic_node_emb_dict.keys())[-1]
+        #     for x in sorted(dynamic_node_emb_dict.keys()):
+        #         if x <= latest_timestamp:
+        #             his_timestamp = x
+        #             continue
+        #         else:
+        #             break 
 
-            graph_dynamic_embeddings = dynamic_node_emb_dict[his_timestamp]
-            dyemb[:, t:t+step_len, :] = F.embedding(input[:, t:t+step_len], graph_dynamic_embeddings.to(input.device))
+        #     graph_dynamic_embeddings = dynamic_node_emb_dict[his_timestamp]
+        #     dyemb[:, t:t+step_len, :] = F.embedding(input[:, t:t+step_len], graph_dynamic_embeddings.to(input.device))
 
         dyemb = self.dropout(dyemb)
 
 
 
-        dyemb_timestamp = torch.zeros(batch_size, max_len).long()
-        dynamic_node_emb_dict_time = sorted(dynamic_node_emb_dict.keys())
-        dynamic_node_emb_dict_time_dict = dict()
-        for i, val in enumerate(dynamic_node_emb_dict_time):
-            dynamic_node_emb_dict_time_dict[val] = i
-        latest_timestamp = dynamic_node_emb_dict_time[-1]
-        for t in range(0, max_len, step_len):
-            try:
-                la_timestamp = torch.max(input_timestamp[:, t:t + step_len]).item()
-                if la_timestamp < 1:
-                    break
-                latest_timestamp = la_timestamp
-            except Exception:
-                pass
+        # dyemb_timestamp = torch.zeros(batch_size, max_len).long()
+        # dynamic_node_emb_dict_time = sorted(dynamic_node_emb_dict.keys())
+        # dynamic_node_emb_dict_time_dict = dict()
+        # for i, val in enumerate(dynamic_node_emb_dict_time):
+        #     dynamic_node_emb_dict_time_dict[val] = i
+        # latest_timestamp = dynamic_node_emb_dict_time[-1]
+        # for t in range(0, max_len, step_len):
+        #     try:
+        #         la_timestamp = torch.max(input_timestamp[:, t:t + step_len]).item()
+        #         if la_timestamp < 1:
+        #             break
+        #         latest_timestamp = la_timestamp
+        #     except Exception:
+        #         pass
 
-            res_index = len(dynamic_node_emb_dict_time_dict) - 1
-            for i, val in enumerate(dynamic_node_emb_dict_time_dict.keys()):
-                if val <= latest_timestamp:
-                    res_index = i
-                    continue
-                else:
-                    break
-            dyemb_timestamp[:, t:t + step_len] = res_index
+        #     res_index = len(dynamic_node_emb_dict_time_dict) - 1
+        #     for i, val in enumerate(dynamic_node_emb_dict_time_dict.keys()):
+        #         if val <= latest_timestamp:
+        #             res_index = i
+        #             continue
+        #         else:
+        #             break
+        #     dyemb_timestamp[:, t:t + step_len] = res_index
 
 
 
         final_embed = torch.cat([dyemb, order_embed], dim=-1) # dynamic_node_emb
 
-        final_embed = self.time_attention(dyemb_timestamp.to(input.device), final_embed, mask)
+        # final_embed = self.time_attention(dyemb_timestamp.to(input.device), final_embed, mask)
+        final_embed = self.time_attention(input_interval.to(input.device), final_embed, mask)
 
         att_out = self.decoder_attention(final_embed, final_embed, final_embed, mask=mask)
 

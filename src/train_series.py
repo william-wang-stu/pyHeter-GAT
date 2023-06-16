@@ -56,6 +56,7 @@ parser.add_argument('--n-interval', type=int, default=40, help="Number of Time I
 parser.add_argument('--n-component', type=int, default=3, help="Number of Prominent Component Topic Classes Foreach Topic")
 parser.add_argument('--window-size', type=int, default=200, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
+parser.add_argument('--use-gat', action='store_true', default=False, help="Use GAT as Backbone")
 parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
 parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
 parser.add_argument('--unified-dim', type=int, default=128, help='Unified Dimension of Different Feature Spaces.')
@@ -158,13 +159,13 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss,)
+            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], data['diffusion_graph'], cas_tss,)
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
             pred_cascade, _ = model((cas_users, cas_intervals, None, None))
         elif args.model == 'dhgpntm':
-            pred_cascade = model(cas_users, cas_tss, None, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, cas_intervals, None, data['diffusion_graph'])
         elif args.model == 'forest':
             pred_cascade, _ = model(cas_users)
         elif args.model == 'ndm':
@@ -210,13 +211,13 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], cas_tss,)
+            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], data['diffusion_graph'], cas_tss,)
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
         elif args.model == 'tan':
             pred_cascade, _ = model((cas_users, cas_intervals, None, None))
         elif args.model == 'dhgpntm':
-            pred_cascade = model(cas_users, cas_tss, None, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_tss, cas_intervals, None, data['diffusion_graph'])
         elif args.model == 'forest':
             pred_cascade, _ = model(cas_users)
         elif args.model == 'ndm':
@@ -301,10 +302,14 @@ def main():
     
     elif args.model == 'heteredgegat':
         # classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/classid2simmat_windowsize{args.window_size}.pkl"))
-        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph_usetrain.data"))
-        # classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph_usefull.data"))
+        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph_usefull.data"))
         if args.cuda:
             classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
+        
+        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
+        if args.cuda:
+            diffusion_graph = diffusion_graph[sorted(diffusion_graph.keys())[-1]].to(args.gpu)
+        
         n_simmat = max(classid2simmat.keys())+1
         hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
 
@@ -316,11 +321,11 @@ def main():
             if args.cuda:
                 user_topic_preference = user_topic_preference.to(args.gpu)
         
-        new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference}
+        new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference, "diffusion_graph": diffusion_graph}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = HeterEdgeGATNetwork(n_feat=user_side_emb.size(1), n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
-            attn_dropout=args.attn_dropout, dropout=args.dropout, use_topic_pref=args.use_topic_preference)
+        model = HeterEdgeGATNetwork(n_feat=32, n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
+            attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference)
     
     elif args.model == 'diffusiongat':
         # diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, args.dataset))
@@ -350,7 +355,8 @@ def main():
         new_d = {'diffusion_graph':diffusion_graph}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = DyHGCN_H(train_data.user_size, 64)
+        # model = DyHGCN_H(train_data.user_size, 64, 8)
+        model = DyHGCN_H(train_data.user_size, 64, args.n_interval)
     
     elif args.model == 'forest':
         model = RNNModel('GRUCell', train_data.user_size, 64, 64)
