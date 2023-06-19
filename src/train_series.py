@@ -71,8 +71,8 @@ parser.add_argument('--lr', type=float, default=3e-2, help='Initial learning rat
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
 parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropout rate (1 - keep probability).')
-parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
-parser.add_argument('--heads', type=str, default="4,4", help="Heads in each layer, splitted with comma")
+parser.add_argument('--hidden-units', type=str, default="32,32", help="Hidden units in each hidden layer, splitted with comma")
+parser.add_argument('--heads', type=str, default="2,2", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--gpu', type=str, default="cuda:6", help="Select GPU")
 # >> Ablation Study

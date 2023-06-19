@@ -55,17 +55,19 @@ class GCNNetwork(nn.Module):
         layer_stack = nn.ModuleList()
         batchnorm_stack = nn.ModuleList()
         for layer_i, (n_unit, f_out,) in enumerate(zip(extend_units[:-1], extend_units[1:],)):
-            is_last_layer = layer_i != len(extend_units[:-1])-1
+            not_last_layer = layer_i != len(extend_units[:-1])-1
             layer_stack.append(
                 GCNConv(in_channels=n_unit, out_channels=f_out, add_self_loops=True,),
             )
-            if not is_last_layer:
+            if not not_last_layer:
                 batchnorm_stack.append(nn.BatchNorm1d(f_out))
         return layer_stack, batchnorm_stack
     
     def forward(self, graph, emb):
         graph_edge_index = graph.edge_index
         graph_weight = graph.edge_weight
+        # raw_emb = emb.clone()
+        fusion_emb = [emb.unsqueeze(2)]
 
         for layer_i, (gat_layer, batchnorm_layer) in enumerate(zip(self.layer_stack, self.batchnorm_stack)):
             emb = gat_layer(emb, graph_edge_index, graph_weight)
@@ -73,8 +75,12 @@ class GCNNetwork(nn.Module):
                 emb = batchnorm_layer(emb)
                 emb = F.elu(emb)
                 emb = F.dropout(emb, self.dropout, training=self.training)
+            fusion_emb.append(emb.unsqueeze(2))
         emb = self.layer_stack[-1](emb, graph_edge_index, graph_weight)
-        return emb
+        fusion_emb.append(emb.unsqueeze(2))
+        fusion_emb = torch.mean(torch.cat(fusion_emb, dim=2), dim=2)
+        # fusion_emb = torch.mean(torch.cat([raw_emb.unsqueeze(2),emb.unsqueeze(2)], dim=2), dim=2)
+        return fusion_emb
 
 class GATNetwork(nn.Module):
     def __init__(
@@ -97,18 +103,20 @@ class GATNetwork(nn.Module):
         batchnorm_stack = nn.ModuleList()
         for layer_i, (n_unit, n_head, f_out, fin_head) in enumerate(zip(extend_units[:-1], n_heads, extend_units[1:], [None]+n_heads[:-1])):
             f_in = n_unit*fin_head if fin_head is not None else n_unit
-            is_last_layer = layer_i != len(extend_units[:-1])-1
+            not_last_layer = layer_i != len(extend_units[:-1])-1
             layer_stack.append(
-                GATv2Conv(heads=n_head, in_channels=f_in, out_channels=f_out, concat=is_last_layer, dropout=attn_dropout, add_self_loops=True, edge_dim=1),
+                # GATv2Conv(heads=n_head, in_channels=f_in, out_channels=f_out, concat=not_last_layer, dropout=attn_dropout, add_self_loops=True, edge_dim=1),
+                GATv2Conv(heads=n_head, in_channels=f_in, out_channels=f_out, concat=True, dropout=attn_dropout, add_self_loops=True, edge_dim=1),
                 # SpGATLayer(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout),
             )
-            if not is_last_layer:
+            if not_last_layer:
                 batchnorm_stack.append(nn.BatchNorm1d(f_out*n_head))
         return layer_stack, batchnorm_stack
     
     def forward(self, graph, emb):
         graph_edge_index = graph.edge_index
         graph_weight = graph.edge_weight
+        fusion_emb = [emb.unsqueeze(2)]
 
         for layer_i, (gat_layer, batchnorm_layer) in enumerate(zip(self.layer_stack, self.batchnorm_stack)):
             emb = gat_layer(emb, graph_edge_index, graph_weight)
@@ -116,8 +124,11 @@ class GATNetwork(nn.Module):
                 emb = batchnorm_layer(emb)
                 emb = F.elu(emb)
                 emb = F.dropout(emb, self.dropout, training=self.training)
+            fusion_emb.append(emb.unsqueeze(2))
         emb = self.layer_stack[-1](emb, graph_edge_index, graph_weight)
-        return emb
+        fusion_emb.append(emb.unsqueeze(2))
+        fusion_emb = torch.mean(torch.cat(fusion_emb, dim=2), dim=2)
+        return fusion_emb
 
 class TimeAttention_New(nn.Module):
     def __init__(self, ninterval, nfeat, dropout=0.1):
@@ -313,10 +324,12 @@ class HeterEdgeGATNetwork(nn.Module):
         if not self.use_topic_pref:
             self.additive_attention = AdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
             # self.fc_topic_net = nn.Linear(n_units[-1]*(n_comp+1), shape_ret[0])
-        n_dim = n_comp-1
-        self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=n_units[-1]*(n_dim+1)+self.pos_emb_dim)
-        self.decoder_attention = TransformerBlock(input_size=n_units[-1]*(n_dim+1)+self.pos_emb_dim, n_heads=8)
-        self.fc_network = nn.Linear(n_units[-1]*(n_dim+1)+self.pos_emb_dim, shape_ret[1])
+        n_dim = 0
+        # n_dim = n_comp
+        last_dim = n_units[-1] if not use_gat else n_units[-1]*n_heads[-1]
+        self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=last_dim*(n_dim+1)+self.pos_emb_dim)
+        self.decoder_attention = TransformerBlock(input_size=last_dim*(n_dim+1)+self.pos_emb_dim, n_heads=8)
+        self.fc_network = nn.Linear(last_dim*(n_dim+1)+self.pos_emb_dim, shape_ret[1])
         self.init_weights()
     
     def init_weights(self):
@@ -353,8 +366,9 @@ class HeterEdgeGATNetwork(nn.Module):
         # n_comp, d = selected_aware_seq_embs.size()[2:]
         # selected_aware_seq_embs = selected_aware_seq_embs.view(-1,n_comp,d) # (bs*max_len, n_comp, D')
         selected_aware_seq_embs = F.dropout(selected_aware_seq_embs, self.dropout)
+        selected_aware_seq_embs = torch.mean(selected_aware_seq_embs, dim=2)
         
-        # user_seq_embs = F.embedding(cas_uids, user_emb)
+        # user_seq_embs = F.embedding(cas_uids, user_emb2)
         # user_seq_embs = user_seq_embs.view(-1,user_seq_embs.size(-1)) # (bs*max_len, D)
         # assert user_seq_embs.size(0) == selected_aware_seq_embs.size(0)
 
