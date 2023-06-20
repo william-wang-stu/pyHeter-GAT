@@ -1,6 +1,7 @@
 from lib.log import logger
 
 import numpy as np
+from scipy.sparse import coo_matrix
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +10,7 @@ from torch_geometric.nn import GCNConv, GATv2Conv
 from utils.Constants import PAD
 from src.model import AdditiveAttention, SpGATLayer
 from src.sota.DHGPNTM.TransformerBlock import TransformerBlock
-from src.sota.DHGPNTM.DyHGCN import DynamicGraphNN, GraphNN
+from src.sota.DHGPNTM.DyHGCN import DynamicGraphNN, GraphNN, SpecialGraphNN
 from typing import Dict
 
 def get_previous_user_mask(seq, user_size):
@@ -70,7 +71,7 @@ class GCNNetwork(nn.Module):
         fusion_emb = [emb.unsqueeze(2)]
 
         for layer_i, (gat_layer, batchnorm_layer) in enumerate(zip(self.layer_stack, self.batchnorm_stack)):
-            emb = gat_layer(emb, graph_edge_index, graph_weight)
+            emb = gat_layer(emb, graph_edge_index, graph_weight).float()
             if layer_i < len(self.layer_stack):
                 emb = batchnorm_layer(emb)
                 emb = F.elu(emb)
@@ -194,112 +195,60 @@ class BasicGATNetwork(nn.Module):
         return output
 
 class DiffusionGATNetwork(nn.Module):
-    def __init__(self, n_feat, n_adj, n_units, n_heads, num_interval, shape_ret,
-        attn_dropout, dropout,
-    ):
+    def __init__(self, n_interval, shape_ret, dropout,):
         """
         shape_ret: (n_units[-1], #user)
         """
         super(DiffusionGATNetwork, self).__init__()
 
-        # self.dropout = dropout
+        ntoken = shape_ret[1]
+        ninp = shape_ret[0]
+        self.ninp = ninp
+        self.user_size = ntoken
+
+        self.pos_dim = 8
+        self.pos_embedding = nn.Embedding(1000, self.pos_dim)
+
         self.dropout = nn.Dropout(dropout)
-        self.user_size = shape_ret[1]
-        # self.user_emb = nn.Embedding(self.user_size, n_feat, padding_idx=PAD)
-        self.gnn_diffusion_layer = DynamicGraphNN(self.user_size, shape_ret[0])
-        self.ninp = shape_ret[0]
-        self.pos_emb_dim = 8
-        self.pos_emb = nn.Embedding(1000, self.pos_emb_dim)
-        # self.gat_network = GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout)
-        # self.heter_gat_network = nn.ModuleList([
-        #     # GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout)
-        #     GPN(num_layers=2, num_mlp_layers=2, input_dim=n_feat, hidden_dim=n_units[0], output_dim=n_units[-1])
-        #     for _ in range(n_adj)])
-        self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=shape_ret[0]+self.pos_emb_dim)
-        self.decoder_attention = TransformerBlock(input_size=shape_ret[0]+self.pos_emb_dim, n_heads=8)
-        self.fc_network = nn.Linear(shape_ret[0]+self.pos_emb_dim, shape_ret[1])
+        self.drop_timestamp = nn.Dropout(dropout)
+
+        self.gnn_diffusion = SpecialGraphNN(ntoken, ninp)
+        self.time_attention = TimeAttention_New(n_interval, self.ninp + self.pos_dim)
+        self.decoder_attention = TransformerBlock(input_size=ninp + self.pos_dim, n_heads=8)
+        self.linear = nn.Linear(ninp + self.pos_dim, ntoken)
         self.init_weights()
     
     def init_weights(self):
         # init.xavier_normal_(self.user_emb.weight)
-        init.xavier_normal_(self.pos_emb.weight)
-        init.xavier_normal_(self.fc_network.weight)
+        init.xavier_normal_(self.pos_embedding.weight)
+        init.xavier_normal_(self.linear.weight)
     
     def forward(self, cas_uids, cas_tss, diffusion_graph):
         cas_uids = cas_uids[:,:-1]
         cas_tss = cas_tss[:,:-1]
+        mask = (cas_uids == PAD)
 
-        dynamic_node_emb_dict = self.gnn_diffusion_layer(diffusion_graph) #input, input_timestamp, diffusion_graph) 
-        
-        batch_size, max_len = cas_uids.size()
-        dyemb = torch.zeros(batch_size, max_len, self.ninp).to(cas_uids.device)
-        step_len = 1
-        
-        latest_timestamp = sorted(dynamic_node_emb_dict.keys())[-1]
-        for t in range(0, max_len, step_len):
-            try:
-                la_timestamp = torch.max(cas_tss[:, t:t+step_len]).item()
-                if la_timestamp < 1:
-                    break 
-                latest_timestamp = la_timestamp 
-            except Exception:
-                # print (input_timestamp[:, t:t+step_len])
-                pass 
+        batch_t = torch.arange(cas_uids.size(1)).expand(cas_uids.size()).to(cas_uids.device)
+        order_embed = self.dropout(self.pos_embedding(batch_t))
 
-            his_timestamp = sorted(dynamic_node_emb_dict.keys())[-1]
-            for x in sorted(dynamic_node_emb_dict.keys()):
-                if x <= latest_timestamp:
-                    his_timestamp = x
-                    continue
-                else:
-                    break 
-
-            graph_dynamic_embeddings = dynamic_node_emb_dict[his_timestamp]
-            dyemb[:, t:t+step_len, :] = F.embedding(cas_uids[:, t:t+step_len], graph_dynamic_embeddings.to(cas_uids.device))
-
-        # dyemb = F.dropout(dyemb, self.dropout)
+        latest_timestamp = sorted(diffusion_graph.keys())[-1]
+        graph_dynamic_embeddings = self.gnn_diffusion(diffusion_graph[latest_timestamp])
+        dyemb = F.embedding(cas_uids, graph_dynamic_embeddings.to(cas_uids.device))
         dyemb = self.dropout(dyemb)
 
-        dyemb_timestamp = torch.zeros(batch_size, max_len).long()
-        dynamic_node_emb_dict_time = sorted(dynamic_node_emb_dict.keys())
-        dynamic_node_emb_dict_time_dict = dict()
-        for i, val in enumerate(dynamic_node_emb_dict_time):
-            dynamic_node_emb_dict_time_dict[val] = i
-        latest_timestamp = dynamic_node_emb_dict_time[-1]
-        for t in range(0, max_len, step_len):
-            try:
-                la_timestamp = torch.max(cas_tss[:, t:t + step_len]).item()
-                if la_timestamp < 1:
-                    break
-                latest_timestamp = la_timestamp
-            except Exception:
-                pass
+        final_embed = torch.cat([dyemb, order_embed], dim=-1) # dynamic_node_emb
 
-            res_index = len(dynamic_node_emb_dict_time_dict) - 1
-            for i, val in enumerate(dynamic_node_emb_dict_time_dict.keys()):
-                if val <= latest_timestamp:
-                    res_index = i
-                    continue
-                else:
-                    break
-            dyemb_timestamp[:, t:t + step_len] = res_index
+        # final_embed = self.time_attention(dyemb_timestamp.to(input.device), final_embed, mask)
+        final_embed = self.time_attention(cas_tss.to(cas_uids.device), final_embed, mask)
 
-        mask = (cas_uids == PAD)
-        batch_t = torch.arange(cas_uids.size(1)).expand(cas_uids.size()).to(cas_uids.device)
-        # pos_embs = F.dropout(self.pos_emb(batch_t), self.dropout)
-        pos_embs = self.dropout(self.pos_emb(batch_t))
+        att_out = self.decoder_attention(final_embed, final_embed, final_embed, mask=mask)
 
-        seq_embs = self.time_attention(dyemb_timestamp.to(cas_uids.device), torch.cat([dyemb, pos_embs], dim=-1), mask)
-        # seq_embs = F.dropout(seq_embs, self.dropout)
-        # seq_embs = self.dropout(seq_embs)
-
-        seq_embs = self.decoder_attention(seq_embs, seq_embs, seq_embs, mask)
-        seq_embs = self.dropout(seq_embs)
-
-        output = self.fc_network(seq_embs) # (bs, max_len, |V|)
+        att_out = self.dropout(att_out)
+        output = self.linear(att_out)  # (bsz, user_len, |U|)
         mask = get_previous_user_mask(cas_uids, self.user_size)
         output = output + mask
-        return output
+
+        return output.view(-1, output.size(-1))
 
 class HeterEdgeGATNetwork(nn.Module):
     def __init__(self, n_feat, n_adj, n_comp, n_units, n_heads, num_interval, shape_ret,
@@ -336,6 +285,29 @@ class HeterEdgeGATNetwork(nn.Module):
         # if not self.use_topic_pref:
         #     init.xavier_normal_(self.fc_topic_net.weight)
         init.xavier_normal_(self.fc_network.weight)
+    
+    def buildMotifInducedAdjacencyMatrix(self, relation_matrix):
+        # build csr matrix
+        row, col = relation_matrix.edge_index
+        weight = relation_matrix.edge_weight
+        S = coo_matrix((weight.tolist(), (row.tolist(),col.tolist())), shape=(self.user_size, self.user_size), dtype=np.uint8)
+        B = S.multiply(S.transpose())
+        U = S - B
+        C1 = (U.dot(U)).multiply(U.transpose())
+        A1 = C1 + C1.transpose()
+        C2 = (B.dot(U)).multiply(U.transpose()) + (U.dot(B)).multiply(U.transpose()) + (U.dot(U)).multiply(B)
+        A2 = C2 + C2.transpose()
+        C3 = (B.dot(B)).multiply(U) + (B.dot(U)).multiply(B) + (U.dot(B)).multiply(B)
+        A3 = C3 + C3.transpose()
+        A4 = (B.dot(B)).multiply(B)
+        C5 = (U.dot(U)).multiply(U) + (U.dot(U.transpose())).multiply(U) + (U.transpose().dot(U)).multiply(U)
+        A5 = C5 + C5.transpose()
+        A6 = (U.dot(B)).multiply(U) + (B.dot(U.transpose())).multiply(U.transpose()) + (U.transpose().dot(U)).multiply(B)
+        A7 = (U.transpose().dot(B)).multiply(U.transpose()) + (B.dot(U)).multiply(U) + (U.dot(U.transpose())).multiply(B)
+        A = S + A1 + A2 + A3 + A4 + A5 + A6 + A7
+        A = A.transpose().multiply(1.0/A.sum(axis=1).reshape(1, -1))
+        A = A.transpose()
+        return A
     
     def forward(self, user_emb, cas_uids, cas_intervals, cas_classids:torch.Tensor, hedge_graphs, diffusion_graph, cas_tss=None, ):
         assert len(hedge_graphs) == len(self.heter_gat_network)

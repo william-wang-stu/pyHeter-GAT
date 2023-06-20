@@ -41,7 +41,7 @@ parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
 parser.add_argument('--dataset', type=str, default='Weibo-Aminer', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
-parser.add_argument('--model', type=str, default='heteredgegat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
+parser.add_argument('--model', type=str, default='diffusiongat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
@@ -57,6 +57,7 @@ parser.add_argument('--n-component', type=int, default=3, help="Number of Promin
 parser.add_argument('--window-size', type=int, default=200, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--use-gat', action='store_true', default=False, help="Use GAT as Backbone")
+parser.add_argument('--use-motif', action='store_true', default=False, help="Use Motif-Enhanced Graph")
 parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
 parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
 parser.add_argument('--unified-dim', type=int, default=128, help='Unified Dimension of Different Feature Spaces.')
@@ -71,10 +72,10 @@ parser.add_argument('--lr', type=float, default=3e-2, help='Initial learning rat
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
 parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropout rate (1 - keep probability).')
-parser.add_argument('--hidden-units', type=str, default="32,32", help="Hidden units in each hidden layer, splitted with comma")
+parser.add_argument('--hidden-units', type=str, default="64,64", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="2,2", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:6", help="Select GPU")
+parser.add_argument('--gpu', type=str, default="cuda:5", help="Select GPU")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 
@@ -161,7 +162,7 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         elif args.model == 'heteredgegat':
             pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], data['diffusion_graph'], cas_tss,)
         elif args.model == 'diffusiongat':
-            pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
         elif args.model == 'tan':
             pred_cascade, _ = model((cas_users, cas_intervals, None, None))
         elif args.model == 'dhgpntm':
@@ -213,7 +214,7 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         elif args.model == 'heteredgegat':
             pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], data['diffusion_graph'], cas_tss,)
         elif args.model == 'diffusiongat':
-            pred_cascade = model(cas_users, cas_tss, data['diffusion_graph'])
+            pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
         elif args.model == 'tan':
             pred_cascade, _ = model((cas_users, cas_intervals, None, None))
         elif args.model == 'dhgpntm':
@@ -301,8 +302,8 @@ def main():
             attn_dropout=args.attn_dropout, dropout=args.dropout)
     
     elif args.model == 'heteredgegat':
-        # classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/classid2simmat_windowsize{args.window_size}.pkl"))
-        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_diffusion_graph_usefull.data"))
+        base_filename = "topic_diffusion_graph" if not args.use_motif else "topic_diffusion_motif_graph"
+        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/{base_filename}_windowsize{args.window_size}.data"))
         if args.cuda:
             classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
         
@@ -324,20 +325,20 @@ def main():
         new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference, "diffusion_graph": diffusion_graph}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = HeterEdgeGATNetwork(n_feat=32, n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
+        n_feat = n_units[0] if not args.use_gat else n_units[0]*n_heads[0]
+        model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference)
     
     elif args.model == 'diffusiongat':
-        # diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, args.dataset))
-        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
+        # diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
+        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_motif_graph.data"))
         if args.cuda:
             diffusion_graph = {key:value.to(args.gpu) for key, value in diffusion_graph.items()}
         
         new_d = {'diffusion_graph':diffusion_graph}
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-        model = DiffusionGATNetwork(n_feat=64, n_adj=None, n_units=None, n_heads=None, num_interval=len(diffusion_graph), shape_ret=(64,train_data.user_size), 
-            attn_dropout=args.attn_dropout, dropout=args.dropout)
+        model = DiffusionGATNetwork(n_interval=args.n_interval, shape_ret=(64,train_data.user_size), dropout=0.3)
 
     elif args.model == 'tan':
         opt = Option()

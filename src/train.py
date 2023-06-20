@@ -23,6 +23,7 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from torch.utils.tensorboard import SummaryWriter
 
+DATA_ROOTPATH = "/".join(DATA_ROOTPATH.split('/')[:-1])
 logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
 
 def load_labels(g:igraph.Graph, cascades:List[Tuple[int,int]], args:dict)->Union[None,Tuple[torch.Tensor,torch.Tensor]]:
@@ -124,20 +125,20 @@ else:
 user_nodes = g.vs["label"]
 
 # 2. User-Side Feats
-structural_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/vertex_feature_subgle483.npy"))
-three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/user_features/user_features_avg.p"))
+structural_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/deperacated/user_features/vertex_feature_subgle483.npy"))
+three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/deperacated/user_features/user_features_avg.p"))
 deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/deepwalk/deepwalk_added.emb_64"), max_idx=user_nodes[-1]+1)
 
 # 3. User-Tweet-Mp, Tweet-Side Feats
 if args.embedding_method == 'lda':
     # user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp.p"))
-    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/lda-model/doc2topic_k25_maxiter50.p"))
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/deperacated/lda-model/doc2topic_k25_maxiter50.p"))
 elif args.embedding_method == 'bertopic':
     # user_tweet_mp = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/basic/usertweet_mp_filter_lt2words_processedforbert_subg.pkl"))
-    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/tweet-embedding/bertopic/topic_distribution_remove_hyphen_reduce_auto.pkl"))
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, "HeterGAT/deperacated/tweet-embedding/bertopic/topic_distribution_remove_hyphen_reduce_auto.pkl"))
 elif args.embedding_method == 'llm':
     use_url_suffix = "_timeline_url" if args.use_url_timeline else ""
-    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/tweet-embedding/llm/tag_embs_aggbyuser{use_url_suffix}_model_xlm-roberta-base_pca_dim{args.unified_dim}.pkl"))
+    tweet_features = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/deperacated/tweet-embedding/llm/tag_embs_aggbyuser{use_url_suffix}_model_xlm-roberta-base_pca_dim{args.unified_dim}.pkl"))
 if not isinstance(tweet_features, np.ndarray):
     tweet_features = np.array(tweet_features)
 
@@ -205,7 +206,10 @@ n_heads = [int(x) for x in args.heads.strip().split(",")]
 nb_classes = 2
 
 if args.model == 'densegat':
-    edges = g.get_edgelist() + [(i,i) for i in range(len(user_nodes))]
+    # edges = g.get_edgelist() + [(i,i) for i in range(len(user_nodes))]
+    diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/diffusion_graph.data")
+    edges = diffusion_graph[sorted(diffusion_graph.keys())[-1]].edge_index.tolist()
+    edges = [(l1,l2) for l1,l2 in zip(edges[0], edges[1])] + [(i,i) for i in range(len(user_nodes))]
     adj = create_sparsemat_from_edgelist(edges, m=len(user_nodes), n=len(user_nodes))
     adj = get_sparse_tensor(adj.tocoo())
 
@@ -234,22 +238,22 @@ elif args.model == 'heteredgegat':
     adj = get_sparse_tensor(adj.tocoo())
 
     # Building Topic-Enhanced Mats...
-    classid2simmat_filepath = f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm-topic/classid2simmat_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl"
-    tagid2classids_filepath = f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm-topic/tagid2classids_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl"
+    classid2simmat_filepath = f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/deperacated/tweet-embedding/llm-topic/classid2simmat_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl"
+    tagid2classids_filepath = f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/deperacated/tweet-embedding/llm-topic/tagid2classids_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl"
     if os.path.exists(classid2simmat_filepath) and os.path.exists(tagid2classids_filepath):
         classid2simmat = load_pickle(classid2simmat_filepath)
         tagid2classids = load_pickle(tagid2classids_filepath)
     else:
         TOPIC_PRETRAINED_MODELNAME = 'tweet-topic-21-multi'
-        labels_aggby_timeline = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/tweet-embedding/llm-topic/topic_labels_llm_normtexts_aggby_timeline_model_{TOPIC_PRETRAINED_MODELNAME}.pkl"))
+        labels_aggby_timeline = load_pickle(os.path.join(DATA_ROOTPATH, f"HeterGAT/deperacated/tweet-embedding/llm-topic/topic_labels_llm_normtexts_aggby_timeline_model_{TOPIC_PRETRAINED_MODELNAME}.pkl"))
         classid2simedges, tagid2classids = build_heteredge_mats(timelines=timelines, preprocess_timelines_keys=list(preprocess_timelines.keys()), labels_aggby_timeline=labels_aggby_timeline, window_size=args.window_size, n_component=args.n_component)
         classid2simmat = {}
         for class_id, simedges in classid2simedges.items():
             extend_adj = create_sparsemat_from_edgelist(edges+simedges, m=n_user, n=n_user)
             extend_adj = get_sparse_tensor(extend_adj.tocoo())
             classid2simmat[class_id] = extend_adj
-        save_pickle(classid2simmat, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm-topic/classid2simmat_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl")
-        save_pickle(tagid2classids, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/tweet-embedding/llm-topic/tagid2classids_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl")
+        save_pickle(classid2simmat, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/deperacated/tweet-embedding/llm-topic/classid2simmat_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl")
+        save_pickle(tagid2classids, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/deperacated/tweet-embedding/llm-topic/tagid2classids_minuser{args.min_user_participate}_windowsize{args.window_size}.pkl")
     logger.info(f"Completed Calculating classid2simmat map={len(classid2simmat)}...")
 
     if args.use_random_multiedge:

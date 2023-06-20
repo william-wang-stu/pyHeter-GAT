@@ -76,6 +76,24 @@ class DynamicGraphNN(nn.Module):
             res[key] = graph_x_embeddings
         return res 
 
+class SpecialGraphNN(nn.Module):
+    def __init__(self, ntoken, nhid, dropout=0.3):
+        super(SpecialGraphNN, self).__init__()
+        self.nhid = nhid
+        self.ntoken = ntoken
+        self.embedding = nn.Embedding(ntoken, nhid, padding_idx=0)
+        init.xavier_normal_(self.embedding.weight)
+
+        self.gpn = GPN(2, 2, nhid, nhid*2, nhid)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, diffusion_graph):
+        graph_edge_index = diffusion_graph.edge_index
+        graph_weight = diffusion_graph.edge_weight
+        graph_x_embeddings = self.gpn(self.embedding.weight, graph_edge_index, graph_weight)
+        graph_x_embeddings = self.drop(graph_x_embeddings)
+        return graph_x_embeddings 
+
 class Namespace(object):
     '''
     helps referencing object in a dictionary as dict.key instead of dict['key']
@@ -284,6 +302,7 @@ class DyHGCN_H(nn.Module):
 
         # self.gnn_layer = GraphNN(ntoken, ninp)
         self.gnn_diffusion_layer = DynamicGraphNN(ntoken, ninp)
+        self.gnn_diffusion = SpecialGraphNN(ntoken, ninp)
         self.pos_embedding = nn.Embedding(1000, self.pos_dim)
 
         self.time_attention = TimeAttention_New(n_interval, self.ninp + self.pos_dim)
@@ -308,10 +327,11 @@ class DyHGCN_H(nn.Module):
         # dyemb = torch.zeros(batch_size, max_len, self.ninp).to(input.device)
         # step_len = 1
         
-        dynamic_node_emb_dict = self.gnn_diffusion_layer(diffusion_graph) #input, input_timestamp, diffusion_graph) 
+        # dynamic_node_emb_dict = self.gnn_diffusion_layer(diffusion_graph) #input, input_timestamp, diffusion_graph) 
         
-        latest_timestamp = sorted(dynamic_node_emb_dict.keys())[-1]
-        graph_dynamic_embeddings = dynamic_node_emb_dict[latest_timestamp]
+        latest_timestamp = sorted(diffusion_graph.keys())[-1]
+        # graph_dynamic_embeddings = dynamic_node_emb_dict[latest_timestamp]
+        graph_dynamic_embeddings = self.gnn_diffusion(diffusion_graph[latest_timestamp])
         dyemb = F.embedding(input, graph_dynamic_embeddings.to(input.device))
         # for t in range(0, max_len, step_len):
         #     try:
