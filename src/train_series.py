@@ -16,6 +16,7 @@ from utils.metric import compute_metrics
 from utils.Constants import PAD, EOS
 from utils.Optim import ScheduledOptim
 from utils.Patience import EarlyStopping
+from src.graph_learner import *
 from src.data_loader import DataConstruct
 from src.model_pyg import *
 from src.sota.TAN.model import TAN
@@ -31,6 +32,7 @@ import time
 import torch
 import torch.optim as optim
 from torch_geometric.data import Data
+from torch_geometric.utils import dense_to_sparse
 # from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -41,7 +43,7 @@ parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
 parser.add_argument('--dataset', type=str, default='Weibo-Aminer', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
-parser.add_argument('--model', type=str, default='diffusiongat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
+parser.add_argument('--model', type=str, default='heteredgegat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
 parser.add_argument('--class-weight-balanced', action='store_true', default=True, help="Adjust weights inversely proportional to class frequencies in the input data")
@@ -64,6 +66,14 @@ parser.add_argument('--unified-dim', type=int, default=128, help='Unified Dimens
 parser.add_argument('--d_model', type=int, default=64, help='Options in ScheduledOptim')
 parser.add_argument('--n_warmup_steps', type=int, default=1000, help='Options in ScheduledOptim')
 parser.add_argument('--patience', type=int, default=10, help='Patience Steps of EarlyStopping')
+# >> Graph Denoising
+parser.add_argument('--type_learner', type=str, default='fgp', choices=["fgp", "att", "mlp", "gnn"])
+parser.add_argument('--k', type=int, default=30)
+parser.add_argument('--sim_function', type=str, default='cosine', choices=['cosine', 'minkowski'])
+parser.add_argument('--gamma', type=float, default=0.9)
+parser.add_argument('--activation_learner', type=str, default='relu', choices=["relu", "tanh"])
+parser.add_argument('--sparse', type=int, default=0)
+parser.add_argument('--use-diffusion-graph', action='store_true', default=False, help="Use Diffusion Graph")
 # >> Hyper-Param
 parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train.')
 parser.add_argument('--batch-size', type=int, default=32, help='Number of epochs to train.')
@@ -145,6 +155,10 @@ def get_scores2(opt, pred_cascade:torch.Tensor, gold_cascade:torch.Tensor, k_lis
 def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='train_'):
     model.train()
 
+    if args.model == 'heteredgegat' and not args.use_diffusion_graph:
+        data['graph_learner'].train()
+        data['optimizer_learner'].zero_grad()
+    
     loss, correct, total = 0., 0., 0.
     for _, batch in enumerate(data['batch']):
     # for _, batch in enumerate(tqdm(data['batch'])):
@@ -160,7 +174,16 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], data['diffusion_graph'], cas_tss,)
+            if args.use_diffusion_graph:
+                learned_adj = data['diffusion_graph']
+            else:
+                learned_adj = data['graph_learner'](data['features'])
+                if args.type_learner == 'fgp':
+                    learned_adj[learned_adj<1e-2] = 0.
+                
+                edge_index, edge_weight = dense_to_sparse(learned_adj)
+                learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
+            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], learned_adj, cas_tss,)
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -185,6 +208,10 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         loss += loss_batch.item()
         correct += n_correct.item()
         total += n_words
+    
+    if args.model == 'heteredgegat' and not args.use_diffusion_graph:
+        data['optimizer_learner'].step()
+    
     writer.add_scalar(log_desc+'loss', loss/total, epoch_i+1)
     writer.add_scalar(log_desc+'acc',  n_correct/total, epoch_i+1)
 
@@ -193,6 +220,9 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
 def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[10,50,100], log_desc='valid_'):
     model.eval()
 
+    if args.model == 'heteredgegat' and not args.use_diffusion_graph:
+        data['graph_learner'].eval()
+    
     loss, correct, total = 0., 0., 0.
     scores = {'MRR': 0,}
     for k in k_list:
@@ -212,7 +242,16 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], data['diffusion_graph'], cas_tss,)
+            if args.use_diffusion_graph:
+                learned_adj = data['diffusion_graph']
+            else:
+                learned_adj = data['graph_learner'](data['features'])
+                if args.type_learner == 'fgp':
+                    learned_adj[abs(learned_adj-1)>1e-6] = 0
+                
+                edge_index, edge_weight = dense_to_sparse(learned_adj)
+                learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
+            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], learned_adj, cas_tss,)
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -246,6 +285,8 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
             scores[f'map@{k}'] += scores_batch[f'map@{k}'] * n_words
     
     model.train()
+    if args.model == 'heteredgegat' and not args.use_diffusion_graph:
+        data['graph_learner'].train()
     
     scores['MRR'] /= total
     for k in k_list:
@@ -293,6 +334,11 @@ def main():
     if args.cuda:
         user_side_emb = user_side_emb.to(args.gpu)
     
+    tweet_aggy_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim128.pkl"))
+    tweet_side_emb = torch.FloatTensor(tweet_aggy_feat)
+    if args.cuda:
+        tweet_side_emb = tweet_side_emb.to(args.gpu)
+    
     new_d = {'user_side_emb': user_side_emb}
     train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
@@ -321,13 +367,32 @@ def main():
             user_topic_preference = torch.cat((user_topic_preference, torch.mean(user_topic_preference, dim=1).view(-1,1)), dim=1)
             if args.cuda:
                 user_topic_preference = user_topic_preference.to(args.gpu)
-        
-        new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference, "diffusion_graph": diffusion_graph}
-        train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
         n_feat = n_units[0] if not args.use_gat else n_units[0]*n_heads[0]
         model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference)
+        
+        # Graph Denoising
+        features = torch.cat([torch.FloatTensor(tweet_aggy_feat),],dim=1)
+
+        if args.type_learner == 'fgp':
+            graph_learner = FGP_learner(features, k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse)
+        elif args.type_learner == 'mlp':
+            graph_learner = MLP_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, act=args.activation_learner)
+        elif args.type_learner == 'att':
+            graph_learner = ATT_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, mlp_act=args.activation_learner)
+        elif args.type_learner == 'gnn':
+            u_e = torch.from_numpy(np.array(user_edges))
+            anchor_adj = dgl.graph((u_e[:,0], u_e[:,1]), num_nodes=train_data.user_size, device=args.gpu)
+            graph_learner = GNN_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, mlp_act=args.activation_learner, adj=anchor_adj)
+        if args.cuda:
+            features = features.to(args.gpu)
+            graph_learner = graph_learner.to(args.gpu)
+        optimizer_learner = torch.optim.Adam(graph_learner.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        
+        new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference, 'diffusion_graph': diffusion_graph, 
+                 'features': features, 'graph_learner': graph_learner, 'optimizer_learner': optimizer_learner, }
+        train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
     
     elif args.model == 'diffusiongat':
         # diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))

@@ -11,6 +11,9 @@ from scipy import sparse
 from typing import Any, Dict, List, Tuple, Union
 from itertools import combinations
 from tqdm import tqdm
+from torch_geometric.data import Data
+from torch_geometric.utils import from_scipy_sparse_matrix
+from scipy.sparse import coo_matrix
 
 def init_graph(nb_nodes:int, edgelist:List[Any], is_directed:bool=False, outputfile_dirpath:str="", save_graph:bool=False):
     graph = igraph.Graph(nb_nodes, directed=is_directed)
@@ -523,6 +526,47 @@ def merge_simedges_from_similar_tags(tag2simedges_mp:dict, classid2tagids:dict,)
         classid2simedges[class_id] = simedges
     return classid2simedges
 
+def merge_user_edges_with_topic_edges(user_edges, classid2simedges:dict, user_size:int, add_self_loop=False,):
+    user_edges = user_edges + [(i,i) for i in range(user_size)]
+
+    classid2simmat = {}
+    for key, simedges in classid2simedges.items():
+        edges = list(zip(*user_edges+simedges))
+        edges_t = torch.LongTensor(edges) # (2,#num_edges)
+        weight_t = torch.FloatTensor([1]*edges_t.size(1))
+        classid2simmat[key] = Data(edge_index=edges_t, edge_weight=weight_t)
+    
+    return classid2simmat
+
+def buildMotifInducedAdjacencyMatrix(relation_matrix, user_size):
+    # build csr matrix
+    row, col = relation_matrix.edge_index
+    weight = relation_matrix.edge_weight
+    self_loop = np.arange(user_size)
+    row = np.concatenate([row, self_loop])
+    col = np.concatenate([col, self_loop])
+    weight = np.concatenate([weight, np.ones(user_size)])
+    S = coo_matrix((weight.tolist(), (row.tolist(),col.tolist())), shape=(user_size, user_size), dtype=np.float16)
+    
+    B = S.multiply(S.transpose())
+    U = S - B
+    C1 = (U.dot(U)).multiply(U.transpose())
+    A1 = C1 + C1.transpose()
+    C2 = (B.dot(U)).multiply(U.transpose()) + (U.dot(B)).multiply(U.transpose()) + (U.dot(U)).multiply(B)
+    A2 = C2 + C2.transpose()
+    C3 = (B.dot(B)).multiply(U) + (B.dot(U)).multiply(B) + (U.dot(B)).multiply(B)
+    A3 = C3 + C3.transpose()
+    A4 = (B.dot(B)).multiply(B)
+    C5 = (U.dot(U)).multiply(U) + (U.dot(U.transpose())).multiply(U) + (U.transpose().dot(U)).multiply(U)
+    A5 = C5 + C5.transpose()
+    A6 = (U.dot(B)).multiply(U) + (B.dot(U.transpose())).multiply(U.transpose()) + (U.transpose().dot(U)).multiply(B)
+    A7 = (U.transpose().dot(B)).multiply(U.transpose()) + (B.dot(U)).multiply(U) + (U.dot(U.transpose())).multiply(B)
+    A = S + A1 + A2 + A3 + A4 + A5 + A6 + A7
+    A = coo_matrix((weight, (row, col)), shape=(user_size,user_size), dtype=np.float16)
+    A = A.transpose().multiply(1.0/A.sum(axis=1).reshape(1, -1))
+    A = A.transpose()
+    return A
+
 def build_heteredge_mats(data_dict:list, window_size:int, n_component:int,):
     # 1. Build Tag2SimEdges Mp
     tag2simedges_mp_filepath = os.path.join(DATA_ROOTPATH, f"HeterGAT/tweet-embedding/llm-topic/tag2simedges_mp_windowsize{window_size}_model_tweet-topic-21-multi.pkl")
@@ -576,3 +620,53 @@ def build_heteredge_mats(data_dict:list, window_size:int, n_component:int,):
     #     classid2simmat[class_id] = Data(edge_index=edges_t, edge_weight=weight_t)
 
     return classid2simedges, tagid2classids
+
+def build_heteredge_mats2(data_dict:dict, _u2idx:dict, window_size:int, n_component:int, dataset:str='Weibo-Aminer'):
+    t_cascades = {}
+    for tag, cascades in data_dict.items():
+        userlist = [[_u2idx[user], ts, label] for user, ts, label in zip(cascades['user'], cascades['ts'], cascades['label']) if user in _u2idx]
+        pair_user = []
+        full_size = min(window_size, len(userlist))
+        for size in range(full_size):
+            pair_user.extend([(i[0], j[0], j[1], i[2], j[2], i[2]==j[2]) for i, j in zip(userlist[::1], userlist[size::1])])
+        t_cascades[tag] = pair_user
+    
+    t_cascades_pd = pd.DataFrame([elem for value in t_cascades.values() for elem in value])
+    t_cascades_pd.columns = ["user1", "user2", "timestamp", 'label1', 'label2', 'same_label']
+    max_label = max(t_cascades_pd[['label1','label2']].max().tolist())
+
+    # build tag2classids
+    tag2simedges = {}
+    for tag, pair_users in t_cascades.items():
+        simedges = {}
+        for topic_i in range(max_label+1):
+            if topic_i == 12: pair_users = random.choices(pair_users, k=int(0.1*len(pair_users)))
+            simedges[topic_i] = list(filter(lambda x:x[3]==topic_i and topic_i[5]==True, pair_users))
+        tag2simedges[tag] = simedges
+    tagid2classids = find_prominent_components_foreach_tag(tag2simedges, n_component=n_component)
+    save_pickle(tagid2classids, os.path.join(DATA_ROOTPATH, f"{dataset}/llm/tagid2classids_windowsize{window_size}.pkl"))
+
+    # build class2simedges
+    t_cascades_pd = t_cascades_pd.sort_values(by="timestamp")
+    classid2simedges = dict()
+    for topic_i in range(max_label+1):
+        t_cascades_pd_sub = t_cascades_pd
+        t_cascades_pd_sub = t_cascades_pd_sub[(t_cascades_pd_sub['same_label']==True) & (t_cascades_pd_sub['label1'] == topic_i)]
+        if topic_i == 12: t_cascades_pd_sub = t_cascades_pd_sub.sample(frac=0.1, replace=False, random_state=2023)
+        classid2simedges[topic_i] = t_cascades_pd_sub.apply(lambda x: (x["user1"], x["user2"]), axis=1).tolist()
+        # logger.info(f"{topic_i}, {len(classid2simedges[topic_i])}")
+    save_pickle(classid2simedges, os.path.join(DATA_ROOTPATH, f"{dataset}/llm/classid2simedges_windowsize{window_size}.pkl"))
+
+    user_edges = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/{dataset}/edges.data")
+    classid2simmat = merge_user_edges_with_topic_edges(user_edges, classid2simedges, user_size=len(_u2idx), add_self_loop=True)
+    save_pickle(classid2simmat, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/{dataset}/topic_diffusion_graph_windowsize{window_size}.data")
+
+    classid2simmat2 = {}
+    for classid, simmat in classid2simmat.items():
+        motif_adj = buildMotifInducedAdjacencyMatrix(simmat, len(_u2idx))
+        edge_index, edge_weight = from_scipy_sparse_matrix(motif_adj)
+        classid2simmat2[classid] = Data(edge_index=edge_index, edge_weight=edge_weight)
+        # logger.info(f"{classid}, {classid2simmat2[classid].edge_index.size(1)}")
+    save_pickle(classid2simmat2, f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/{dataset}/topic_diffusion_motif_graph_windowsize{window_size}.data")
+
+    return classid2simmat2, tagid2classids

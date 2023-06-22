@@ -318,27 +318,27 @@ class HeterEdgeGATNetwork(nn.Module):
             cas_tss = cas_tss[:,:-1]
         user_emb2 = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
 
-        heter_user_embs = []
-        for heter_i, gat_network in enumerate(self.heter_gat_network):
-            graph_emb = gat_network(hedge_graphs[heter_i], user_emb2)
-            heter_user_embs.append(graph_emb.unsqueeze(1))
-        topic_aware_embs = torch.cat(heter_user_embs, dim=1)
-        # topic_aware_embs = self.heter_gat_network[-1](diffusion_graph) # largest
+        # heter_user_embs = []
+        # for heter_i, gat_network in enumerate(self.heter_gat_network):
+        #     graph_emb = gat_network(hedge_graphs[heter_i], user_emb2)
+        #     heter_user_embs.append(graph_emb.unsqueeze(1))
+        # topic_aware_embs = torch.cat(heter_user_embs, dim=1)
+        topic_aware_embs = self.heter_gat_network[-1](diffusion_graph, user_emb2) # largest
 
-        aware_seq_embs = F.embedding(cas_uids, topic_aware_embs.reshape(self.user_size,-1))
+        seq_embs = F.embedding(cas_uids, topic_aware_embs.reshape(self.user_size,-1))
         
-        bs, ml, _ = aware_seq_embs.size()
-        aware_seq_embs = aware_seq_embs.reshape(bs, ml, -1, topic_aware_embs.size(-1)) # (bs, max_len, |Rs|+1, D')
+        # bs, ml, _ = aware_seq_embs.size()
+        # aware_seq_embs = aware_seq_embs.reshape(bs, ml, -1, topic_aware_embs.size(-1)) # (bs, max_len, |Rs|+1, D')
         
-        selected_aware_seq_embs = torch.zeros(bs, ml, cas_classids.size(1), topic_aware_embs.size(-1)) # (bs, max_len, n_comp, D')
-        if aware_seq_embs.is_cuda:
-            selected_aware_seq_embs = selected_aware_seq_embs.to(aware_seq_embs.device)
-        for batch_i in range(bs):
-            selected_aware_seq_embs[batch_i] = aware_seq_embs[batch_i, :, cas_classids[batch_i], :]
-        # n_comp, d = selected_aware_seq_embs.size()[2:]
-        # selected_aware_seq_embs = selected_aware_seq_embs.view(-1,n_comp,d) # (bs*max_len, n_comp, D')
-        selected_aware_seq_embs = F.dropout(selected_aware_seq_embs, self.dropout)
-        selected_aware_seq_embs = torch.mean(selected_aware_seq_embs, dim=2)
+        # selected_aware_seq_embs = torch.zeros(bs, ml, cas_classids.size(1), topic_aware_embs.size(-1)) # (bs, max_len, n_comp, D')
+        # if aware_seq_embs.is_cuda:
+        #     selected_aware_seq_embs = selected_aware_seq_embs.to(aware_seq_embs.device)
+        # for batch_i in range(bs):
+        #     selected_aware_seq_embs[batch_i] = aware_seq_embs[batch_i, :, cas_classids[batch_i], :]
+        # # n_comp, d = selected_aware_seq_embs.size()[2:]
+        # # selected_aware_seq_embs = selected_aware_seq_embs.view(-1,n_comp,d) # (bs*max_len, n_comp, D')
+        # selected_aware_seq_embs = F.dropout(selected_aware_seq_embs, self.dropout)
+        # selected_aware_seq_embs = torch.mean(selected_aware_seq_embs, dim=2)
         
         # user_seq_embs = F.embedding(cas_uids, user_emb2)
         # user_seq_embs = user_seq_embs.view(-1,user_seq_embs.size(-1)) # (bs*max_len, D)
@@ -346,8 +346,7 @@ class HeterEdgeGATNetwork(nn.Module):
 
         # fusion_seq_embs = self.additive_attention(user_seq_embs, selected_aware_seq_embs) # (bs*max_len, 1, D')
         # seq_embs = torch.cat((selected_aware_seq_embs, fusion_seq_embs),dim=1).reshape(bs,ml,-1) # (bs, max_len, (n_comp+1)*D')
-        # seq_embs = self.fc_topic_net(seq_embs)
-        seq_embs = selected_aware_seq_embs.reshape(bs,ml,-1)
+        # seq_embs = selected_aware_seq_embs.reshape(bs,ml,-1)
         seq_embs = F.dropout(seq_embs, self.dropout)
 
         batch_t = torch.arange(cas_uids.size(1)).expand(cas_uids.size()).to(cas_uids.device)
