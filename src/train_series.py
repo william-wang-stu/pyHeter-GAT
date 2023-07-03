@@ -73,7 +73,7 @@ parser.add_argument('--sim_function', type=str, default='cosine', choices=['cosi
 parser.add_argument('--gamma', type=float, default=0.9)
 parser.add_argument('--activation_learner', type=str, default='relu', choices=["relu", "tanh"])
 parser.add_argument('--sparse', type=int, default=0)
-parser.add_argument('--use-diffusion-graph', action='store_true', default=False, help="Use Diffusion Graph")
+parser.add_argument('--use-diffusion-graph', action='store_true', default=True, help="Use Diffusion Graph")
 # >> Hyper-Param
 parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train.')
 parser.add_argument('--batch-size', type=int, default=32, help='Number of epochs to train.')
@@ -84,8 +84,8 @@ parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 
 parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropout rate (1 - keep probability).')
 parser.add_argument('--hidden-units', type=str, default="64,64", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="2,2", help="Heads in each layer, splitted with comma")
-parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:5", help="Select GPU")
+parser.add_argument('--check-point', type=int, default=1, help="Check point")
+parser.add_argument('--gpu', type=str, default="cuda:2", help="Select GPU")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 
@@ -180,7 +180,6 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
                 learned_adj = data['graph_learner'](data['features'])
                 if args.type_learner == 'fgp':
                     learned_adj[learned_adj<1e-2] = 0.
-                
                 edge_index, edge_weight = dense_to_sparse(learned_adj)
                 learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
             pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], learned_adj, cas_tss,)

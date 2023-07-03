@@ -10,6 +10,8 @@ from utils.graph import *
 from utils.tweet_clustering import tweet_centralized_process
 from utils.metric import compute_metrics
 from src.model import DenseSparseGAT, HeterEdgeSparseGAT
+from src.sota.TAN.model import TAN
+from src.sota.TAN.Option import Option
 import numpy as np
 import argparse
 import shutil
@@ -92,7 +94,7 @@ parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden un
 parser.add_argument('--heads', type=str, default="8,8", help="Heads in each layer, splitted with comma")
 parser.add_argument('--stage', type=int, default=Ntimestage-1, help="Time Stage (0~Ntimestage-1)")
 # parser.add_argument('--patience', type=int, default=5, help='Patience for EarlyStopping')
-parser.add_argument('--check-point', type=int, default=10, help="Check point")
+parser.add_argument('--check-point', type=int, default=1, help="Check point")
 parser.add_argument('--train-ratio', type=float, default=0.8, help="Training ratio (0, 100)")
 parser.add_argument('--valid-ratio', type=float, default=0.1, help="Validation ratio (0, 100)")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
@@ -286,6 +288,12 @@ elif args.model == 'heteredgegat':
         static_emb = static_emb.to(args.gpu)
         dynamic_embs = [emb.to(args.gpu) for emb in dynamic_embs]
         model = model.to(args.gpu)
+
+elif args.model == 'tan':
+    opt = Option()
+    opt.user_size = train_data.user_size
+    new_d = {'opt':opt}
+    model = TAN(opt)
 
 optimizer = optim.Adagrad(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 

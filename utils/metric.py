@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.stats import rankdata
 from utils.Constants import PAD, EOS
+from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, precision_recall_curve
+from sklearn.preprocessing import OneHotEncoder
 
 def apk(actual, predicted, k=10):
     """
@@ -65,6 +67,19 @@ def compute_metrics(y_prob, y_true, k_list=[10,50,100]):
     y_true_simp = np.array(y_true_simp)
     
     scores = {}
+
+    # # Calculate F1
+    # y_pred_simp = y_prob_simp.argmax(axis=1)
+    # _, _, f1, _ = precision_recall_fscore_support(y_true_simp, y_pred_simp, average="micro")
+    # scores['F1'] = f1
+
+    # # Calculate AUC
+    # # y_true_onehot = np.eye(y_prob.shape[1])[y_true_simp]
+    # y_prob_norm = np.exp(y_prob_simp) / np.sum(np.exp(y_prob_simp), axis=1, keepdims=True)
+    # auc = roc_auc_score(y_true_simp, y_prob_norm, multi_class='ovr')
+    # scores['AUC'] = auc
+
+    # Calculate Rank-Series Metrics, i.e. MRR, Hits@N, Map@N
     scores['MRR'] = MRR(y_prob_simp, y_true_simp)
     for k in k_list:
         scores['hits@' + str(k)] = hits_k(y_prob_simp, y_true_simp, k=k)
