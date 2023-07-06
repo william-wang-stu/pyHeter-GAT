@@ -251,17 +251,26 @@ class Data:
             self.diffusion[k] = sorted(self.diffusion[k], key=lambda item: item[1])
 
 if __name__ == '__main__':
+    dataset = 'Weibo-Aminer'
     args = {
         "min_active_neighbor": 3,
         "min_inf": 5,
         "max_inf": 400,
+        # Twitter-Huangxin
+        # "min_degree": 3,
+        # "max_degree": 38, # options: [38,62,109,262,307,384]
+        # "ego_size": 49, # options: [49, 99]
+        # "negative": 1, # options: [1,3]
+
+        # Weibo-Aminer
         "min_degree": 3,
-        "max_degree": 38, # options: [38,62,109,262,307,384]
+        "max_degree": 269, # options: [47,59,97,269,350]
         "ego_size": 49, # options: [49, 99]
         "negative": 1, # options: [1,3]
+        
         "restart_prob": 0.2,
         "walk_length": 1000,
-        "output": f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/subgraph_sampling/",
+        "output": f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/{dataset}/subgraph_sampling",
         # "graph_file": "/root/TR-pptusn/DeepInf-master/dataset/data/raw-digg/digg_friends.csv",
         # "vote_file":  "/root/TR-pptusn/DeepInf-master/dataset/data/raw-digg/digg_votes1.csv",
     }
@@ -270,8 +279,8 @@ if __name__ == '__main__':
     ))
     logger.info("output={}".format(args["output"]))
 
-    graph:igraph.Graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/deg_le483_subgraph.p")
-    timelines:Dict[int,list] = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/basic/build_cascades/deg_le483_timeline_aggby_url_tag.pkl")
+    graph:igraph.Graph = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/{dataset}/basic/graph.pkl")
+    timelines:Dict[int,list] = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/{dataset}/basic/timeline.pkl")
     degree = graph.degree()
 
     data = Data(args)

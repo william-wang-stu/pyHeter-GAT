@@ -45,7 +45,7 @@ class ChunkSampler(Sampler):
         return self.num_samples
 
 class InfluenceDataSet(Dataset):
-    def __init__(self, file_dir, seed, shuffle, model):
+    def __init__(self, file_dir, seed, shuffle, model, hedge_graphs=None):
         self.graphs = np.load(os.path.join(file_dir, "adjacency_matrix.npy")).astype(np.float32)
         # self-loop trick, the input graphs should have no self-loop
         identity = np.identity(self.graphs.shape[1])
@@ -89,6 +89,16 @@ class InfluenceDataSet(Dataset):
         n_classes = self.get_num_class()
         class_weight = self.N / (n_classes * np.bincount(self.labels))
         self.class_weight = torch.FloatTensor(class_weight)
+
+        if hedge_graphs is not None:
+            def from_indices_to_adjs(graph, indices):
+                ranks = np.argsort(np.argsort(indices))
+                subgraph = graph.subgraph(indices, implementation="create_from_scratch")
+                adjacency = np.array(subgraph.get_adjacency().data)
+                adjacency = adjacency[ranks][:, ranks]
+                return adjacency
+            hadjs = np.array([[from_indices_to_adjs(hgraph, indices) for hgraph in hedge_graphs] for indices in self.vertices], dtype=np.uint8)
+            self.hadjs = hadjs + np.identity(self.vertices.shape[1], dtype=np.uint8)
     
     def get_influence_feature_dimension(self):
         return self.influence_features.shape[-1]
@@ -103,7 +113,10 @@ class InfluenceDataSet(Dataset):
         return self.N
 
     def __getitem__(self, idx):
-        return self.graphs[idx], self.influence_features[idx], self.labels[idx], self.vertices[idx]
+        if hasattr(self, 'hadjs'):
+            return self.hadjs[idx], self.influence_features[idx], self.labels[idx], self.vertices[idx]
+        else:
+            return self.graphs[idx], self.influence_features[idx], self.labels[idx], self.vertices[idx]
 
 class DataConstruct(object):
     ''' For data iteration '''

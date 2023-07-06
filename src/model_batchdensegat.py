@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
+from typing import List
 
 class BatchMultiHeadGraphAttention(nn.Module):
     def __init__(self, n_head, f_in, f_out, attn_dropout, bias=False):
@@ -77,7 +78,7 @@ class BatchAdditiveAttention(nn.Module):
 
 class BatchDenseGAT(nn.Module):
     def __init__(
-        self, global_embs, n_feat, n_units, n_heads, shape_ret,
+        self, global_embs, n_feat, n_units, n_heads, 
         attn_dropout, dropout, instance_normalization=False, norm_mask=None, fine_tune=False,
     ) -> None:
         """
@@ -139,3 +140,82 @@ class BatchDenseGAT(nn.Module):
                 emb = F.dropout(emb, self.dropout, training=self.training)
         # emb = self.fc_layer(emb) # bs*n*shape_ret[1]
         return F.log_softmax(emb, dim=-1)
+
+class HeterEdgeDenseGAT(nn.Module):
+    def __init__(self, global_embs, n_feat, n_adj, n_units, n_heads, 
+        attn_dropout, dropout, instance_normalization=False, norm_mask=None, fine_tune=False,
+    ):
+        """
+        shape_ret: (n_units[-1], #user)
+        """
+        super(HeterEdgeDenseGAT, self).__init__()
+
+        self.dropout = dropout
+        self.inst_norm = instance_normalization
+        # self.user_size = shape_ret[1]
+
+        self.norm_mask = norm_mask
+        for i, global_emb in enumerate(global_embs):
+            emb = nn.Embedding(global_emb.size(0), global_emb.size(1))
+            emb.weight = nn.Parameter(global_emb)
+            emb.weight.requires_grad = fine_tune
+            setattr(self, f"emb-{i}", emb)
+
+            if self.inst_norm:
+                norm = nn.InstanceNorm1d(global_emb.size(1), momentum=0.0, affine=True)
+                setattr(self, f"norm-{i}", norm)
+
+        # self.pos_emb_dim = 8
+        # self.pos_emb  = nn.Embedding(1000, self.pos_emb_dim)
+
+        self.layer_stack = nn.ModuleList([
+            self._build_layer_stack(extend_units=[n_feat]+n_units, n_heads=n_heads, attn_dropout=attn_dropout)
+            for _ in range(n_adj)])
+
+        self.additive_attention = BatchAdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
+        # self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=last_dim*(n_dim+1)+self.pos_emb_dim)
+            
+    def _build_layer_stack(self, extend_units, n_heads, attn_dropout):
+        layer_stack = nn.ModuleList()
+        for n_unit, n_head, f_out, fin_head in zip(extend_units[:-1], n_heads, extend_units[1:], [None]+n_heads[:-1]):
+            f_in = n_unit*fin_head if fin_head is not None else n_unit
+            layer_stack.append(
+                BatchMultiHeadGraphAttention(n_head=n_head, f_in=f_in, f_out=f_out, attn_dropout=attn_dropout),
+            )
+        return layer_stack
+    
+    def forward(self, hedge_graphs:torch.Tensor, vertices:torch.Tensor, local_emb:torch.Tensor):
+        # hadjs: K*bs*n*n, emb: bs*n*n_feat
+        global_embs = []
+        for i, mask in enumerate(self.norm_mask):
+            emb = getattr(self, f"emb-{i}")
+            global_emb = emb(vertices)
+            if self.inst_norm and mask:
+                norm = getattr(self, f"norm-{i}")
+                global_emb = norm(global_emb.transpose(1,2)).transpose(1,2)
+            global_embs.append(global_emb)
+        emb = torch.cat(global_embs, dim=2)
+        emb = torch.cat((emb, local_emb), dim=2)
+
+        assert len(hedge_graphs) >= 1
+        bs, _, n = hedge_graphs.size()[:3]
+        h_embs = []
+        for h_i, layer_stack in enumerate(self.layer_stack):
+            adj = hedge_graphs[:,h_i]
+            h_emb = emb.clone()
+            for i, gat_layer in enumerate(layer_stack):
+                h_emb = gat_layer(h_emb, adj) # bs*n_head*n*f_out
+                if i+1 == len(layer_stack):
+                    h_emb = h_emb.mean(dim=1) # bs*n*f_out
+                else:
+                    h_emb = F.elu(h_emb.transpose(1,2).contiguous().view(bs, n, -1)) # bs*n*(n_head*f_out)
+                    h_emb = F.dropout(h_emb, self.dropout, training=self.training)
+            h_embs.append(h_emb.unsqueeze(2))
+        seq_embs = torch.cat(h_embs, dim=2)
+        seq_embs = F.dropout(seq_embs, self.dropout)
+        
+        fusion_seq_embs = self.additive_attention(emb, seq_embs) # (bs, max_len, 1, D')
+        # seq_embs = torch.mean(
+        #     torch.cat((seq_embs, fusion_seq_embs), dim=2), dim=2)
+        seq_embs = fusion_seq_embs.squeeze(2)
+        return F.log_softmax(seq_embs, dim=-1)

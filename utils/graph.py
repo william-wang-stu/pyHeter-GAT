@@ -641,7 +641,7 @@ def build_heteredge_mats2(data_dict:dict, _u2idx:dict, window_size:int, n_compon
         simedges = {}
         for topic_i in range(max_label+1):
             if topic_i == 12: pair_users = random.choices(pair_users, k=int(0.1*len(pair_users)))
-            simedges[topic_i] = list(filter(lambda x:x[3]==topic_i and topic_i[5]==True, pair_users))
+            simedges[topic_i] = list(filter(lambda x:x[3]==topic_i and x[5]==True, pair_users))
         tag2simedges[tag] = simedges
     tagid2classids = find_prominent_components_foreach_tag(tag2simedges, n_component=n_component)
     save_pickle(tagid2classids, os.path.join(DATA_ROOTPATH, f"{dataset}/llm/tagid2classids_windowsize{window_size}.pkl"))

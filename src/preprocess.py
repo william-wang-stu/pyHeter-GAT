@@ -1,6 +1,6 @@
 # Aminer Dataset
 from utils.graph_aminer import *
-from utils.graph import init_graph, build_heteredge_mats
+from utils.graph import init_graph, build_heteredge_mats, build_heteredge_mats2
 from utils.utils import split_cascades, load_pickle, save_pickle
 from utils.graph_aminer import *
 from utils.tweet_embedding import agg_tagemb_by_user
@@ -10,6 +10,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 from torch_geometric.data import Data
+import igraph
 
 # NOTE:
 # Preliminaries: {train,valid,test}.data, edges.data
@@ -136,3 +137,50 @@ save_pickle(classid2simmat, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weib
 pretrained_model_name = 'xlm-roberta-base'
 user2emb = agg_tagemb_by_user(n_user=len(user_set), cascades=data_dict, pretrained_model_name='xlm-roberta-base')
 save_pickle(user2emb, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim128.pkl")
+
+# Basic
+edgelist = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/edges.data")
+u2idx = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/u2idx.data")
+
+graph = igraph.Graph(len(u2idx), directed=True)
+graph.add_edges(edgelist)
+graph.simplify()
+save_pickle(graph, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/basic/graph.pkl")
+
+cascades = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/cascades.data")
+u2idx = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/u2idx.data")
+new_cascades = {}
+for key, cascade in cascades.items():
+    new_cascades[key] = [(u2idx[a],b) for a,b in zip(cascade['user'],cascade['ts'])]
+save_pickle(new_cascades, "/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/basic/timeline.pkl")
+
+# Statistics
+graph:igraph.Graph = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/basic/graph.pkl")
+deg = graph.degree()
+# deg = list(filter(lambda x:x>97, deg))
+summarize_distribution(deg)
+# NOTE: 85% -> 90% -> 95% -> filter90%+50% -> filter90%+90%
+
+timelines:Dict[int,list] = load_pickle(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/basic/timeline.pkl")
+t_len = [len(cascade) for _, cascade in timelines.items()]
+# t_len = list(filter(lambda x:x>102, t_len))
+# NOTE: 5% -> 90% -> filter90%+50%
+
+# Build Heter-Edge Graphs
+n_component = 3
+for window_size in [200, 300]:
+    _, _ = build_heteredge_mats2(data_dict, u2idx, window_size=window_size, n_component=n_component, dataset='Weibo-Aminer')
+
+# Cascade Triplet Txt
+# cascade_dict = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/cascades.data")
+
+# tag2idx = {}
+# index = 0
+# for tag, cascades in cascade_dict.items():
+#     tag2idx[tag] = index
+#     index += 1
+
+# with open("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/cascade_triplet.txt", 'w') as f:
+#     for tag, cascades in cascade_dict.items():
+#         for user, ts in zip(cascades['user'], cascades['label']):
+#             f.write(f"{ts} {tag2idx[tag]} {user}\n")
