@@ -63,6 +63,61 @@ class MultiHeadGraphAttention(nn.Module):
         else:
             return output
 
+class MultiHeadGraphAttention2(nn.Module):
+    def __init__(self, n_head, feat, attn_dropout, bias=True,):
+        super(MultiHeadGraphAttention2, self).__init__()
+        self.dropout = attn_dropout
+        self.feat = feat
+        self.n_head = n_head
+        self.scaling:int = feat ** -0.5
+        self.in_proj_weight = nn.Parameter(torch.empty(n_head, feat, 2*feat))
+        if bias:
+            self.in_proj_bias = nn.Parameter(torch.empty(n_head, 2*feat))
+        else:
+            self.register_parameter('in_proj_bias', None)
+        self._reset_parameters()
+    
+    def _reset_parameters(self):
+        for i in range(self.n_head):
+            init.xavier_uniform_(self.in_proj_weight[i,:,(self.feat*0):(self.feat*1)])
+            init.xavier_uniform_(self.in_proj_weight[i,:,(self.feat*1):(self.feat*2)])
+        if self.in_proj_bias is not None:
+            init.constant_(self.in_proj_bias, 0.)
+    
+    def _in_proj_qkv(self, input:torch.Tensor):
+        bs, n, n_head = input.size()[:3]
+        input = input.contiguous().view(bs*n,n_head,-1).transpose(0,1) # (n_h,bs*n,feat)
+        output = torch.matmul(input, self.in_proj_weight) # (n_h,bs*n,feat)*(n_h,feat,2*feat)->(n_h,bs*n,2*feat)
+        if self.in_proj_bias is not None:
+            output += self.in_proj_bias.unsqueeze(1)
+        output = output.transpose(0,1).contiguous().view(bs,n,n_head,-1).transpose(1,2).contiguous().view(bs*n_head,n,-1)
+        return output.chunk(2, dim=-1) # (bs*n_head,n,feat)*2
+    
+    def forward(self, query:torch.Tensor, attn_mask:torch.Tensor=None, decay_emb:torch.Tensor=None, pad_mask:torch.Tensor=None):
+        # query: (bs,n,n_head,feat), attn_mask: (bs,n,n), decay_mask: (bs,n), pad_mask: (bs,1,1,n,)
+        bs, n, n_head = query.size()[:3]
+        v = query
+        q, k = self._in_proj_qkv(query)
+        q = q * self.scaling
+        attn_output_weights = torch.bmm(q, k.transpose(1, 2)) # (bs*n_head, n, n)
+        
+        if attn_mask is not None:
+            attn_output_weights = attn_output_weights.view(bs,n_head,n,n).masked_fill(~attn_mask.bool().unsqueeze(1), float('-inf')).view(bs*n_head,n,n)
+        
+        if decay_emb is not None:
+            decay_mask = torch.bmm(decay_emb.unsqueeze(2), decay_emb.unsqueeze(1)) # (bs,n,n)
+            decay_mask = decay_mask.unsqueeze(1).expand(-1,n_head,-1,-1).reshape(bs*n_head,n,n)
+            attn_output_weights += decay_mask
+        
+        if pad_mask is not None:
+            attn_output_weights = attn_output_weights.view(bs,n_head,n,n).masked_fill(pad_mask, float('-inf')).view(bs*n_head,n,n)
+        
+        attn_output_weights = F.softmax(attn_output_weights.float(), dim=-1, dtype=torch.float32 if attn_output_weights.dtype == torch.float16 else attn_output_weights.dtype)
+        attn_output_weights = F.dropout(attn_output_weights, p=self.dropout, training=self.training)
+
+        attn_output = torch.bmm(attn_output_weights, v.transpose(1,2).contiguous().view(bs*n_head,n,-1)).view(bs,n_head,n,-1).transpose(1,2) # (bs*n_head,n,feat) -> (bs,n,n_head,feat)
+        return attn_output.contiguous().view(bs,n,-1) # (bs,n,n_head*feat)
+
 class SpGATLayer(nn.Module):
     def __init__(self, n_head, f_in, f_out, attn_dropout, bias=False):
         super(SpGATLayer, self).__init__()

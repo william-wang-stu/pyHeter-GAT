@@ -37,6 +37,8 @@ from torch_geometric.utils import dense_to_sparse
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimestage={Ntimestage}")
 
 parser = argparse.ArgumentParser()
@@ -58,7 +60,8 @@ parser.add_argument('--n-interval', type=int, default=40, help="Number of Time I
 parser.add_argument('--n-component', type=int, default=3, help="Number of Prominent Component Topic Classes Foreach Topic")
 parser.add_argument('--window-size', type=int, default=200, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
-parser.add_argument('--use-gat', action='store_true', default=False, help="Use GAT as Backbone")
+parser.add_argument('--use-gat', action='store_true', default=True, help="Use GAT as Backbone")
+parser.add_argument('--use-time-decay', action='store_true', default=True, help="Use Time Embedding")
 parser.add_argument('--use-motif', action='store_true', default=False, help="Use Motif-Enhanced Graph")
 parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
 parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
@@ -85,9 +88,10 @@ parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropou
 parser.add_argument('--hidden-units', type=str, default="64,64", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="2,2", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=1, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:2", help="Select GPU")
+parser.add_argument('--gpu', type=str, default="cuda:6", help="Select GPU")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
+parser.add_argument('--use-multi-deepwalk-feat', action='store_true', default=False, help="Use Multi-Heter Deepwalk-Feature if set true (Available only when model='heteredgegat')")
 
 args = parser.parse_args()
 args.cuda = torch.cuda.is_available()
@@ -174,15 +178,15 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            if args.use_diffusion_graph:
-                learned_adj = data['diffusion_graph']
-            else:
-                learned_adj = data['graph_learner'](data['features'])
-                if args.type_learner == 'fgp':
-                    learned_adj[learned_adj<1e-2] = 0.
-                edge_index, edge_weight = dense_to_sparse(learned_adj)
-                learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
-            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], learned_adj, cas_tss,)
+            # if args.use_diffusion_graph:
+            #     learned_adj = data['diffusion_graph']
+            # else:
+            #     learned_adj = data['graph_learner'](data['features'])
+            #     if args.type_learner == 'fgp':
+            #         learned_adj[learned_adj<1e-2] = 0.
+            #     edge_index, edge_weight = dense_to_sparse(learned_adj)
+            #     learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], multi_deepwalk_feat=data['multi_deepwalk_feat'])
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -241,16 +245,15 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         if args.model == 'densegat':
             pred_cascade = model(cas_users, cas_intervals, graph)
         elif args.model == 'heteredgegat':
-            if args.use_diffusion_graph:
-                learned_adj = data['diffusion_graph']
-            else:
-                learned_adj = data['graph_learner'](data['features'])
-                if args.type_learner == 'fgp':
-                    learned_adj[abs(learned_adj-1)>1e-6] = 0
-                
-                edge_index, edge_weight = dense_to_sparse(learned_adj)
-                learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
-            pred_cascade = model(data['user_side_emb'], cas_users, cas_intervals, cas_classids, data['hedge_graphs'], learned_adj, cas_tss,)
+            # if args.use_diffusion_graph:
+            #     learned_adj = data['diffusion_graph']
+            # else:
+            #     learned_adj = data['graph_learner'](data['features'])
+            #     if args.type_learner == 'fgp':
+            #         learned_adj[abs(learned_adj-1)>1e-6] = 0
+            #     edge_index, edge_weight = dense_to_sparse(learned_adj)
+            #     learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], multi_deepwalk_feat=data['multi_deepwalk_feat'])
         elif args.model == 'diffusiongat':
             pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -306,17 +309,7 @@ def main():
     # torch.set_num_threads(4)
 
     dataset_dirpath = f"{DATA_ROOTPATH}/{args.dataset}"
-    # user_ids = read_user_ids(f"{dataset_dirpath}/train_withcontent.data", f"{dataset_dirpath}/valid_withcontent.data", f"{dataset_dirpath}/test_withcontent.data")
-    # edges = get_static_subnetwork(user_ids)
-    # _, edges = reindex_edges(user_ids, edges)
-    user_edges = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/edges.data"))
-    user_edges = list(zip(*user_edges))
-    edges_t = torch.LongTensor(user_edges) # (2,#num_edges)
-    weight_t = torch.FloatTensor([1]*edges_t.size(1))
-    graph = Data(edge_index=edges_t, edge_weight=weight_t)
-    if args.cuda:
-        graph = graph.to(args.gpu)
-
+    
     n_units = [int(x) for x in args.hidden_units.strip().split(",")]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
 
@@ -326,20 +319,32 @@ def main():
 
     train_d = {'batch': train_data}; valid_d = {'batch': valid_data}; test_d = {'batch': test_data}
 
-    vertex_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/vertex_feature_user{train_data.user_size}.npy"))
-    three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/three_sort_feature_user{train_data.user_size}.npy"))
-    deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/deepwalk_emb_user{train_data.user_size}.data"), max_idx=train_data.user_size-1)
-    user_side_emb = torch.cat([torch.FloatTensor(vertex_feat),torch.FloatTensor(deepwalk_feat),torch.FloatTensor(three_sort_feat),],dim=1)
+    # user_ids = read_user_ids(f"{dataset_dirpath}/train_withcontent.data", f"{dataset_dirpath}/valid_withcontent.data", f"{dataset_dirpath}/test_withcontent.data")
+    # edges = get_static_subnetwork(user_ids)
+    # _, edges = reindex_edges(user_ids, edges)
+    user_edges = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/edges.data"))
+    user_edges = user_edges + [(i,i) for i in range(train_data.user_size)]
+    user_edges = list(zip(*user_edges))
+    edges_t = torch.LongTensor(user_edges) # (2,#num_edges)
+    weight_t = torch.FloatTensor([1]*edges_t.size(1))
+    graph = Data(edge_index=edges_t, edge_weight=weight_t)
     if args.cuda:
-        user_side_emb = user_side_emb.to(args.gpu)
+        graph = graph.to(args.gpu)
     
-    tweet_aggy_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim128.pkl"))
-    tweet_side_emb = torch.FloatTensor(tweet_aggy_feat)
-    if args.cuda:
-        tweet_side_emb = tweet_side_emb.to(args.gpu)
+    # vertex_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/vertex_feature_user{train_data.user_size}.npy"))
+    # three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/three_sort_feature_user{train_data.user_size}.npy"))
+    # deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/deepwalk_emb_user{train_data.user_size}.data"), max_idx=train_data.user_size-1)
+    # user_side_emb = torch.cat([torch.FloatTensor(vertex_feat),torch.FloatTensor(deepwalk_feat),torch.FloatTensor(three_sort_feat),],dim=1)
+    # if args.cuda:
+    #     user_side_emb = user_side_emb.to(args.gpu)
     
-    new_d = {'user_side_emb': user_side_emb}
-    train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
+    # tweet_aggy_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim128.pkl"))
+    # tweet_side_emb = torch.FloatTensor(tweet_aggy_feat)
+    # if args.cuda:
+    #     tweet_side_emb = tweet_side_emb.to(args.gpu)
+    
+    # new_d = {'user_side_emb': user_side_emb}
+    # train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
     # TODO: decide on n_feat
     if args.model == 'densegat':
@@ -348,49 +353,61 @@ def main():
     
     elif args.model == 'heteredgegat':
         base_filename = "topic_diffusion_graph" if not args.use_motif else "topic_diffusion_motif_graph"
-        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/{base_filename}_windowsize{args.window_size}.data"))
+        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_graph/{base_filename}_windowsize{args.window_size}.data"))
         if args.cuda:
             classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
+        n_adj = max(classid2simmat.keys())+1
+        hedge_graphs = [graph] * (n_adj+1) if args.use_random_multiedge else \
+            [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)] + [graph]
         
-        diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
-        if args.cuda:
-            diffusion_graph = diffusion_graph[sorted(diffusion_graph.keys())[-1]].to(args.gpu)
+        # diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
+        # if args.cuda:
+        #     diffusion_graph = diffusion_graph[sorted(diffusion_graph.keys())[-1]].to(args.gpu)
         
-        n_simmat = max(classid2simmat.keys())+1
-        hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_simmat)] + [graph]
+        # user_topic_preference = None
+        # if args.use_topic_preference:
+        #     user_topic_preference = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/user_topic_pref_cnt.pkl"))
+        #     # -1 use mean vector
+        #     user_topic_preference = torch.cat((user_topic_preference, torch.mean(user_topic_preference, dim=1).view(-1,1)), dim=1)
+        #     if args.cuda:
+        #         user_topic_preference = user_topic_preference.to(args.gpu)
 
-        user_topic_preference = None
-        if args.use_topic_preference:
-            user_topic_preference = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/user_topic_pref_cnt.pkl"))
-            # -1 use mean vector
-            user_topic_preference = torch.cat((user_topic_preference, torch.mean(user_topic_preference, dim=1).view(-1,1)), dim=1)
-            if args.cuda:
-                user_topic_preference = user_topic_preference.to(args.gpu)
-
-        n_feat = n_units[0] if not args.use_gat else n_units[0]*n_heads[0]
-        model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_simmat, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
-            attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference)
+        n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
+        model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_adj, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
+            attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference, use_time_decay=args.use_time_decay)
         
         # Graph Denoising
-        features = torch.cat([torch.FloatTensor(tweet_aggy_feat),],dim=1)
+        # features = torch.cat([torch.FloatTensor(tweet_aggy_feat),],dim=1)
+        # if args.type_learner == 'fgp':
+        #     graph_learner = FGP_learner(features, k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse)
+        # elif args.type_learner == 'mlp':
+        #     graph_learner = MLP_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, act=args.activation_learner)
+        # elif args.type_learner == 'att':
+        #     graph_learner = ATT_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, mlp_act=args.activation_learner)
+        # elif args.type_learner == 'gnn':
+        #     u_e = torch.from_numpy(np.array(user_edges))
+        #     anchor_adj = dgl.graph((u_e[:,0], u_e[:,1]), num_nodes=train_data.user_size, device=args.gpu)
+        #     graph_learner = GNN_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, mlp_act=args.activation_learner, adj=anchor_adj)
+        # if args.cuda:
+        #     features = features.to(args.gpu)
+        #     graph_learner = graph_learner.to(args.gpu)
+        # optimizer_learner = torch.optim.Adam(graph_learner.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-        if args.type_learner == 'fgp':
-            graph_learner = FGP_learner(features, k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse)
-        elif args.type_learner == 'mlp':
-            graph_learner = MLP_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, act=args.activation_learner)
-        elif args.type_learner == 'att':
-            graph_learner = ATT_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, mlp_act=args.activation_learner)
-        elif args.type_learner == 'gnn':
-            u_e = torch.from_numpy(np.array(user_edges))
-            anchor_adj = dgl.graph((u_e[:,0], u_e[:,1]), num_nodes=train_data.user_size, device=args.gpu)
-            graph_learner = GNN_learner(nlayers=2, isize=features.shape[1], k=args.k, knn_metric=args.sim_function, i=6, sparse=args.sparse, mlp_act=args.activation_learner, adj=anchor_adj)
-        if args.cuda:
-            features = features.to(args.gpu)
-            graph_learner = graph_learner.to(args.gpu)
-        optimizer_learner = torch.optim.Adam(graph_learner.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        # Use Multi Deepwalk Feat
+        multi_deepwalk_feat = None
+        if args.use_multi_deepwalk_feat:
+            multi_deepwalk_feat = []
+            for classid in classid2simmat:
+                deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_graph/feature/topicg_deepwalk_topic{classid}.data"), max_idx=train_data.user_size-1)
+                multi_deepwalk_feat.append(torch.FloatTensor(deepwalk_feat).unsqueeze(-1))
+            deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/deepwalk_emb_user{train_data.user_size}.data"), max_idx=train_data.user_size-1)
+            multi_deepwalk_feat.append(torch.FloatTensor(deepwalk_feat).unsqueeze(-1))
+            multi_deepwalk_feat = torch.cat(multi_deepwalk_feat, dim=-1)
+            if args.cuda:
+                multi_deepwalk_feat = multi_deepwalk_feat.to(args.gpu)
         
-        new_d = {'hedge_graphs':hedge_graphs, 'user_topic_preference':user_topic_preference, 'diffusion_graph': diffusion_graph, 
-                 'features': features, 'graph_learner': graph_learner, 'optimizer_learner': optimizer_learner, }
+        new_d = {'hedge_graphs':hedge_graphs, 'multi_deepwalk_feat':multi_deepwalk_feat,}
+                #  'user_topic_preference':user_topic_preference, 'diffusion_graph': diffusion_graph, 'features': features, 'graph_learner': graph_learner, 'optimizer_learner': optimizer_learner, }
         train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
     
     elif args.model == 'diffusiongat':

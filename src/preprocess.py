@@ -184,3 +184,24 @@ for window_size in [200, 300]:
 #     for tag, cascades in cascade_dict.items():
 #         for user, ts in zip(cascades['user'], cascades['label']):
 #             f.write(f"{ts} {tag2idx[tag]} {user}\n")
+
+# Build Heter-Deepwalk(Node2Vec) Feats
+edgelist_mp = {}
+
+diffusion_graph = load_pickle("/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/topic_diffusion_graph_windowsize200.data")
+for classid, mat in diffusion_graph.items():
+    edgelist = []
+    for from_, to_ in zip(mat.edge_index[0], mat.edge_index[1]):
+        edgelist.append((from_, to_))
+    edgelist_mp[classid] = edgelist
+
+for classid, edgelist in edgelist_mp.items():
+    with open(f"/remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/topic_graph_edgelist/edgelist_ws200_topic{classid}.txt", 'w') as f:
+        for from_, to_ in edgelist:
+            f.write(f"{from_} {to_}\n")
+
+# for i in `seq 1 17`
+# do
+#     # echo $i
+#     deepwalk --input /remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/topic_graph_edgelist/edgelist_ws200_topic${i}.txt --format edgelist --output /remote-home/share/dmb_nas/wangzejian/HeterGAT/Weibo-Aminer/topic_graph_edgelist/feature/topicg_deepwalk_topic${i}.data > log-topicg-deepwalk-topic${i}.txt 2>&1
+# done
