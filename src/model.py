@@ -70,6 +70,7 @@ class MultiHeadGraphAttention2(nn.Module):
         self.feat = feat
         self.n_head = n_head
         self.scaling:int = feat ** -0.5
+        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
         self.in_proj_weight = nn.Parameter(torch.empty(n_head, feat, 2*feat))
         if bias:
             self.in_proj_bias = nn.Parameter(torch.empty(n_head, 2*feat))
@@ -93,16 +94,17 @@ class MultiHeadGraphAttention2(nn.Module):
         output = output.transpose(0,1).contiguous().view(bs,n,n_head,-1).transpose(1,2).contiguous().view(bs*n_head,n,-1)
         return output.chunk(2, dim=-1) # (bs*n_head,n,feat)*2
     
-    def forward(self, query:torch.Tensor, attn_mask:torch.Tensor=None, decay_emb:torch.Tensor=None, pad_mask:torch.Tensor=None):
-        # query: (bs,n,n_head,feat), attn_mask: (bs,n,n), decay_mask: (bs,n), pad_mask: (bs,1,1,n,)
+    def forward(self, query:torch.Tensor, adj:torch.Tensor=None, decay_emb:torch.Tensor=None, pad_mask:torch.Tensor=None):
+        # query: (bs,n,n_head,feat), adj: (bs,n,n), decay_emb: (bs,n), pad_mask: (bs,1,n,n,)
         bs, n, n_head = query.size()[:3]
         v = query
         q, k = self._in_proj_qkv(query)
         q = q * self.scaling
         attn_output_weights = torch.bmm(q, k.transpose(1, 2)) # (bs*n_head, n, n)
+        attn_output_weights = self.leaky_relu(attn_output_weights)
         
-        if attn_mask is not None:
-            attn_output_weights = attn_output_weights.view(bs,n_head,n,n).masked_fill(~attn_mask.bool().unsqueeze(1), float('-inf')).view(bs*n_head,n,n)
+        if adj is not None:
+            attn_output_weights = attn_output_weights.view(bs,n_head,n,n).masked_fill(~adj.bool().unsqueeze(1), float('-inf')).view(bs*n_head,n,n)
         
         if decay_emb is not None:
             decay_mask = torch.bmm(decay_emb.unsqueeze(2), decay_emb.unsqueeze(1)) # (bs,n,n)
