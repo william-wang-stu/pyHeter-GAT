@@ -223,7 +223,8 @@ class DataConstruct(object):
         data_dict = load_pickle(filename)
         
         for tag, cascades in data_dict.items():
-            userlist = [self._u2idx[elem] for elem in cascades['user']]
+            # userlist = [self._u2idx[elem] for elem in cascades['user']]
+            userlist = list(cascades['user'])
             tslist = list(cascades['ts'])
 
             intervallist = list(np.ceil((tslist[-1]-np.array(tslist))/(per_interval*3600)))

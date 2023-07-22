@@ -29,7 +29,7 @@ class Translator(object):
         n_head=model_opt.n_head,
         dropout=model_opt.dropout)
 
-        prob_projection = nn.Softmax()
+        prob_projection = nn.Softmax(dim=-1)
 
         model.load_state_dict(checkpoint['model'])
         print('[Info] Trained model state loaded.')

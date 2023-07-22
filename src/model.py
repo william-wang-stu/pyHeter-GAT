@@ -105,6 +105,7 @@ class MultiHeadGraphAttention2(nn.Module):
         
         if adj is not None:
             attn_output_weights = attn_output_weights.view(bs,n_head,n,n).masked_fill(~adj.bool().unsqueeze(1), float('-inf')).view(bs*n_head,n,n)
+            # attn_output_weights = attn_output_weights.view(bs,n_head,n,n).masked_fill(~adj.T.bool().unsqueeze(1), float('-inf')).view(bs*n_head,n,n)
         
         if decay_emb is not None:
             decay_mask = torch.bmm(decay_emb.unsqueeze(2), decay_emb.unsqueeze(1)) # (bs,n,n)
