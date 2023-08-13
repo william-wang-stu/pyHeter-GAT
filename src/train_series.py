@@ -62,7 +62,8 @@ parser.add_argument('--n-component', type=int, default=3, help="Number of Promin
 parser.add_argument('--window-size', type=int, default=200, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--use-gat', type=int, default=1, help="Use GAT as Backbone")
-parser.add_argument('--use-time-decay', type=int, default=1, help="Use Time Embedding")
+parser.add_argument('--use-time-decay', type=int, default=0, help="Use Time Embedding")
+parser.add_argument('--use-topic-selection', type=int, default=1, help="Use Time Embedding")
 parser.add_argument('--use-motif', action='store_true', default=False, help="Use Motif-Enhanced Graph")
 parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
 parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
@@ -89,9 +90,9 @@ parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropou
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="4,4", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:6", help="Select GPU")
+parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
 # >> Ablation Study
-parser.add_argument('--use-random-multiedge', action='store_true', default=False, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
+parser.add_argument('--use-random-multiedge', type=int, default=0, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 parser.add_argument('--use-multi-deepwalk-feat', action='store_true', default=False, help="Use Multi-Heter Deepwalk-Feature if set true (Available only when model='heteredgegat')")
 parser.add_argument('--use-adj', type=int, default=1, help="Use Adj Matrix to Mask Attn if set true (Available only when model='heteredgegat')")
 
@@ -101,6 +102,7 @@ args.use_gat = args.use_gat == 1
 args.use_time_decay = args.use_time_decay == 1
 args.use_adj = args.use_adj == 1
 args.use_k_adj = args.use_adj == 2
+args.use_topic_selection = args.use_topic_selection == 1
 logger.info(f"Args: {args}")
 
 np.random.seed(args.seed)
@@ -317,6 +319,7 @@ def main():
     dataset_dirpath = f"{DATA_ROOTPATH}/{args.dataset}"
     if args.dataset == 'Twitter-Huangxin':
         dataset_dirpath += '/sub10000'
+        # dataset_dirpath += '/sub5000'
     
     n_units = [int(x) for x in args.hidden_units.strip().split(",")]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
@@ -330,7 +333,7 @@ def main():
     # user_ids = read_user_ids(f"{dataset_dirpath}/train_withcontent.data", f"{dataset_dirpath}/valid_withcontent.data", f"{dataset_dirpath}/test_withcontent.data")
     # edges = get_static_subnetwork(user_ids)
     # _, edges = reindex_edges(user_ids, edges)
-    user_edges = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/edges.data"))
+    user_edges = load_pickle(os.path.join(dataset_dirpath, "edges.data"))
     user_edges = user_edges + [(i,i) for i in range(train_data.user_size)]
     user_edges = list(zip(*user_edges))
     edges_t = torch.LongTensor(user_edges) # (2,#num_edges)
@@ -356,12 +359,19 @@ def main():
 
     # TODO: decide on n_feat
     if args.model == 'densegat':
-        model = BasicGATNetwork(n_feat=16, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_units[-1],train_data.user_size), 
+        n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
+        model = BasicGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_feat,train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout)
     
     elif args.model == 'heteredgegat':
-        base_filename = "topic_diffusion_graph_full" if not args.use_motif else "topic_diffusion_motif_graph"
-        classid2simmat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/topic_graph/{base_filename}_windowsize{args.window_size}.data"))
+        base_filename = "topic_diffusion_graph"
+        if args.use_random_multiedge:
+            base_filename += "_random"
+        elif args.use_motif:
+            base_filename = "topic_diffusion_motif_graph"
+        else:
+            base_filename += "_full"
+        classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_graph/{base_filename}_windowsize{args.window_size}.data"))
         if args.cuda:
             classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
         n_adj = max(classid2simmat.keys())+1
@@ -382,7 +392,8 @@ def main():
 
         n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
         model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_adj, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
-            attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference, use_time_decay=args.use_time_decay, use_adj=args.use_adj)
+            attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference, 
+            use_time_decay=args.use_time_decay, use_adj=args.use_adj, use_topic_selection=args.use_topic_selection,)
         
         # Graph Denoising
         # features = torch.cat([torch.FloatTensor(tweet_aggy_feat),],dim=1)
@@ -438,8 +449,8 @@ def main():
         model = TAN(opt)
     
     elif args.model == 'dhgpntm':
-        diffusion_graph = LoadDynamicHeteGraph(os.path.join(DATA_ROOTPATH, args.dataset))
-        save_pickle(diffusion_graph, os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
+        diffusion_graph = LoadDynamicHeteGraph(dataset_dirpath)
+        save_pickle(diffusion_graph, os.path.join(dataset_dirpath, "/diffusion_graph.data"))
         # diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
         if args.cuda:
             diffusion_graph = {key:value.to(args.gpu) for key, value in diffusion_graph.items()}
