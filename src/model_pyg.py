@@ -421,11 +421,11 @@ class HeterEdgeGATNetwork(nn.Module):
         pos_embs = F.dropout(self.pos_emb(batch_t), self.dropout)
         seq_embs = torch.cat([seq_embs, pos_embs], dim=-1)
 
-        # mask = (cas_uids == PAD)
+        mask = (cas_uids == PAD)
         # seq_embs = self.time_attention(cas_intervals, torch.cat([seq_embs, pos_embs], dim=-1), mask)
         # seq_embs = F.dropout(seq_embs, self.dropout)
 
-        # seq_embs = self.decoder_attention(seq_embs, seq_embs, seq_embs, mask)
+        seq_embs = self.decoder_attention(seq_embs, seq_embs, seq_embs, mask)
         output = self.fc_network(seq_embs) # (bs, max_len, |V|)
         mask = get_previous_user_mask(cas_uids, self.user_size)
         output = output + mask
