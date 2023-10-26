@@ -8,7 +8,7 @@ os.environ['NUMEXPR_MAX_THREADS'] = '8'
 os.environ['NUMEXPR_NUM_THREADS'] = '2'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
-from lib.log import logger
+from utils.log import logger
 from utils.utils import *
 from utils.graph import build_heteredge_mats
 from utils.graph_aminer import *
@@ -62,7 +62,7 @@ parser.add_argument('--n-component', type=int, default=3, help="Number of Promin
 parser.add_argument('--window-size', type=int, default=200, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--use-gat', type=int, default=1, help="Use GAT as Backbone")
-parser.add_argument('--use-time-decay', type=int, default=0, help="Use Time Embedding")
+parser.add_argument('--use-time-decay', type=int, default=1, help="Use Time Embedding")
 parser.add_argument('--use-topic-selection', type=int, default=1, help="Use Time Embedding")
 parser.add_argument('--use-motif', action='store_true', default=False, help="Use Motif-Enhanced Graph")
 parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")

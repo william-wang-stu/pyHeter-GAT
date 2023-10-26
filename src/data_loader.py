@@ -10,7 +10,7 @@ from __future__ import unicode_literals
 from __future__ import division
 from __future__ import print_function
 
-from lib.log import logger
+from utils.log import logger
 from utils.utils import load_w2v_feature, load_pickle
 from utils.Constants import PAD_WORD, EOS_WORD, PAD, EOS
 from utils.graph_aminer import read_user_ids

@@ -4,7 +4,7 @@
 # sys.path.append(os.path.dirname(os.getcwd()))
 
 from lib.utils import get_sparse_tensor
-from lib.log import logger
+from utils.log import logger
 from utils.utils import *
 from utils.graph import *
 from utils.tweet_clustering import tweet_centralized_process

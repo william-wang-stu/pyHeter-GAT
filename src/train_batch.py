@@ -3,7 +3,7 @@
 # import os
 # sys.path.append(os.path.dirname(os.getcwd()))
 
-from lib.log import logger
+from utils.log import logger
 from utils.utils import *
 from utils.graph import *
 from src.model_batchdensegat import BatchDenseGAT, HeterEdgeDenseGAT

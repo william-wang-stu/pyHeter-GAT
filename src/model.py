@@ -2,7 +2,7 @@
 # import sys
 # import os
 # sys.path.append(os.path.dirname(os.getcwd()))
-from lib.log import logger
+from utils.log import logger
 
 import torch
 import torch.nn as nn

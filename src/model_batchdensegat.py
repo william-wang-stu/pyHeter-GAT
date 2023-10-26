@@ -1,4 +1,4 @@
-from lib.log import logger
+from utils.log import logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
