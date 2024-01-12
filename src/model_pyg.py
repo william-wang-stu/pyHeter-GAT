@@ -284,7 +284,10 @@ class DiffusionGATNetwork(nn.Module):
 
 class HeterEdgeGATNetwork(nn.Module):
     def __init__(self, n_feat, n_adj, n_comp, n_units, n_heads, num_interval, shape_ret,
-        attn_dropout, dropout, use_gat=True, instance_normalization=False, use_topic_pref=False, use_time_decay=False, use_adj=True, use_topic_selection=True,
+        attn_dropout, dropout, instance_normalization=False, 
+        use_gat=True, use_time_decay=False, 
+        use_topic_pref=False, use_adj=True, use_topic_selection=True,
+        random_feat_dim=None,
     ):
         """
         shape_ret: (n_units[-1], #user)
@@ -298,11 +301,13 @@ class HeterEdgeGATNetwork(nn.Module):
         self.pos_emb_dim = 8
         self.pos_emb  = nn.Embedding(1000, self.pos_emb_dim)
         if use_gat:
-            self.heter_gat_network = nn.ModuleList([GATNetwork2(n_units, n_heads, attn_dropout, dropout) for _ in range(n_adj+1)])
+            # self.heter_gat_network = nn.ModuleList([GATNetwork2(n_units, n_heads, attn_dropout, dropout) for _ in range(n_adj+1)])
+            self.heter_gat_network = nn.ModuleList([GATNetwork2(n_units, n_heads, attn_dropout, dropout) for _ in range(n_adj)])
         # elif use_gat:
             # self.heter_gat_network = nn.ModuleList([GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout) for _ in range(n_adj+1)])
         else:
-            self.heter_gat_network = nn.ModuleList([GCNNetwork(n_feat, n_units, dropout) for _ in range(n_adj+1)])
+            # self.heter_gat_network = nn.ModuleList([GCNNetwork(n_feat, n_units, dropout) for _ in range(n_adj+1)])
+            self.heter_gat_network = nn.ModuleList([GCNNetwork(n_feat, n_units, dropout) for _ in range(n_adj)])
         self.use_topic_pref = use_topic_pref
         if not self.use_topic_pref:
             self.additive_attention = AdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
@@ -313,10 +318,14 @@ class HeterEdgeGATNetwork(nn.Module):
         else:
             n_dim = n_comp
         last_dim = n_units[-1] if not use_gat else n_units[-1]*n_heads[-1]
+        self.use_random_feat = random_feat_dim is None
+        if not self.use_random_feat:
+            self.feat_fc_layer = nn.Linear(random_feat_dim, n_feat)
         self.use_gat = use_gat
         self.use_time_decay = use_time_decay
         if self.use_time_decay:
-            self.time_decay_emb = nn.Embedding(num_interval, n_adj+1,)
+            # self.time_decay_emb = nn.Embedding(num_interval, n_adj+1,)
+            self.time_decay_emb = nn.Embedding(num_interval, n_adj,)
         self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=last_dim*(n_dim+1)+self.pos_emb_dim)
         self.decoder_attention = TransformerBlock(input_size=last_dim*(n_dim+1)+self.pos_emb_dim, n_heads=8)
         self.fc_network = nn.Linear(last_dim*(n_dim+1)+self.pos_emb_dim, shape_ret[1])
@@ -345,7 +354,7 @@ class HeterEdgeGATNetwork(nn.Module):
         selected_aware_seq_embs = F.dropout(selected_aware_seq_embs, self.dropout)
         return selected_aware_seq_embs
     
-    def forward(self, cas_uids:torch.Tensor, cas_intervals:torch.Tensor, cas_classids:torch.Tensor, hedge_graphs, cas_tss=None, multi_deepwalk_feat:torch.Tensor=None):
+    def forward(self, cas_uids:torch.Tensor, cas_intervals:torch.Tensor, cas_classids:torch.Tensor, hedge_graphs, cas_tss=None, feats:torch.Tensor=None, multi_deepwalk_feat:torch.Tensor=None):
         cas_uids = cas_uids[:,:-1]
         cas_intervals = cas_intervals[:,:-1]
         if cas_tss is not None:
@@ -354,7 +363,10 @@ class HeterEdgeGATNetwork(nn.Module):
         # assert multi_deepwalk_feat.size() == [self.user_size, self.user_emb.embedding_dim//self.n_head, len(hedge_graphs)]
 
         bs, ml = cas_uids.size()[:2]
-        user_emb2 = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
+        if feats is None:
+            user_emb2 = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
+        else:
+            user_emb2 = self.feat_fc_layer(feats)
 
         if not self.use_gat:
             heter_user_embs = []

@@ -45,7 +45,7 @@ logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimesta
 parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--dataset', type=str, default='Weibo-Aminer', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
+parser.add_argument('--dataset', type=str, default='Twitter-Huangxin', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
 parser.add_argument('--model', type=str, default='heteredgegat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
@@ -95,6 +95,11 @@ parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
 parser.add_argument('--use-random-multiedge', type=int, default=0, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 parser.add_argument('--use-multi-deepwalk-feat', action='store_true', default=False, help="Use Multi-Heter Deepwalk-Feature if set true (Available only when model='heteredgegat')")
 parser.add_argument('--use-adj', type=int, default=1, help="Use Adj Matrix to Mask Attn if set true (Available only when model='heteredgegat')")
+# >> Comparison(New)
+parser.add_argument('--tweet2vec', type=int, default=0, help="Utilize texts as feat vectors (No rel. with whether to use textual diffusion channels)")
+parser.add_argument('--tweet2graph', type=int, default=1, help="Utilize texts as textual graphs")
+parser.add_argument('--use-random-vec', type=int, default=1, help="Use Random Vectors (Otherwise use User-Feats or User+Tweet-Feats)")
+parser.add_argument('--sparsity', type=int, default=100, help='Sparsity Comparison (0-100)')
 
 args = parser.parse_args()
 args.cuda = torch.cuda.is_available()
@@ -194,7 +199,8 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
             #         learned_adj[learned_adj<1e-2] = 0.
             #     edge_index, edge_weight = dense_to_sparse(learned_adj)
             #     learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
-            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], multi_deepwalk_feat=data['multi_deepwalk_feat'])
+            # pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], multi_deepwalk_feat=data['multi_deepwalk_feat'])
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], feats=data['feat'], multi_deepwalk_feat=data['multi_deepwalk_feat'])
         # elif args.model == 'diffusiongat':
         #     pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -261,7 +267,8 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
             #         learned_adj[abs(learned_adj-1)>1e-6] = 0
             #     edge_index, edge_weight = dense_to_sparse(learned_adj)
             #     learned_adj = Data(edge_index=edge_index, edge_weight=edge_weight)
-            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], multi_deepwalk_feat=data['multi_deepwalk_feat'])
+            # pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], multi_deepwalk_feat=data['multi_deepwalk_feat'])
+            pred_cascade = model(cas_users, cas_intervals, cas_classids, data['hedge_graphs'], feats=data['feat'], multi_deepwalk_feat=data['multi_deepwalk_feat'])
         # elif args.model == 'diffusiongat':
         #     pred_cascade = model(cas_users, cas_intervals, data['diffusion_graph'])
         elif args.model == 'tan':
@@ -313,6 +320,17 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
     
     return scores
 
+def expand_(feat:torch.Tensor, shape:tuple, pos=0)->torch.Tensor:
+    shape_ = feat.size()
+    # assert len(shape_) == len(shape)
+    for idx, (dim_, dim) in enumerate(zip(shape_, shape)):
+        if dim_ == dim: continue
+        # if dim_ > dim: raise Exception
+        size_ = list(shape); size_[idx] = dim-dim_
+        # TODO: pos=0
+        feat = torch.cat((torch.zeros(size=size_).to(feat.device), feat), dim=idx)
+    return feat
+
 def main():
     # torch.set_num_threads(4)
 
@@ -342,20 +360,29 @@ def main():
     if args.cuda:
         graph = graph.to(args.gpu)
     
-    # vertex_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/vertex_feature_user{train_data.user_size}.npy"))
-    # three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/three_sort_feature_user{train_data.user_size}.npy"))
-    # deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/deepwalk_emb_user{train_data.user_size}.data"), max_idx=train_data.user_size-1)
-    # user_side_emb = torch.cat([torch.FloatTensor(vertex_feat),torch.FloatTensor(deepwalk_feat),torch.FloatTensor(three_sort_feat),],dim=1)
-    # if args.cuda:
-    #     user_side_emb = user_side_emb.to(args.gpu)
-    
-    # tweet_aggy_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim128.pkl"))
-    # tweet_side_emb = torch.FloatTensor(tweet_aggy_feat)
-    # if args.cuda:
-    #     tweet_side_emb = tweet_side_emb.to(args.gpu)
-    
-    # new_d = {'user_side_emb': user_side_emb}
-    # train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
+    # Use Manual Feats or Random Feats
+    if args.use_random_vec == 0:
+        vertex_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/vertex_feature_user{train_data.user_size}.npy"))
+        three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/three_sort_feature_user{train_data.user_size}.npy"))
+        deepwalk_feat = load_w2v_feature(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/deepwalk_emb_user{train_data.user_size}.data"), max_idx=train_data.user_size-1)
+        user_side_emb = torch.cat([torch.FloatTensor(vertex_feat),torch.FloatTensor(deepwalk_feat),torch.FloatTensor(three_sort_feat),],dim=1)
+        if args.cuda:
+            user_side_emb = user_side_emb.to(args.gpu)
+        
+        if args.tweet2vec:
+            tweet_aggy_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/llm/tag_embs_aggbyuser_model_xlm-roberta-base_pca_dim128_user{train_data.user_size}.pkl"))
+            tweet_side_emb = torch.FloatTensor(tweet_aggy_feat)
+            # tweet_side_emb = expand_(tweet_side_emb, shape=(user_side_emb.size(0),tweet_side_emb.size(1)))
+            if args.cuda:
+                tweet_side_emb = tweet_side_emb.to(args.gpu)
+            
+            user_side_emb = torch.cat([user_side_emb, tweet_side_emb], dim=1)
+        
+        new_d = {'feat': user_side_emb}
+    else:
+        new_d = {'feat': None}
+    feat_dim = new_d['feat'].size(1) if new_d['feat'] is not None else None
+    train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
     # TODO: decide on n_feat
     if args.model == 'densegat':
@@ -371,12 +398,23 @@ def main():
             base_filename = "topic_diffusion_motif_graph"
         else:
             base_filename += "_full"
-        classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_graph/{base_filename}_windowsize{args.window_size}.data"))
+        
+        if args.sparsity == 100:
+            sparsity_suffix = ""
+        else:
+            sparsity_suffix = f"_sparsity{args.sparsity}.0"
+        
+        classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_graph/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
         if args.cuda:
             classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
+        
         n_adj = max(classid2simmat.keys())+1
-        hedge_graphs = [graph] * (n_adj+1) if args.use_random_multiedge else \
-            [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)] + [graph]
+        if args.tweet2graph == 0:
+            # hedge_graphs = [graph] * (n_adj+1)
+            hedge_graphs = [graph] * n_adj
+        else:
+            # hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)] + [graph]
+            hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)]
         
         # diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
         # if args.cuda:
@@ -393,7 +431,8 @@ def main():
         n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
         model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_adj, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
             attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference, 
-            use_time_decay=args.use_time_decay, use_adj=args.use_adj, use_topic_selection=args.use_topic_selection,)
+            use_time_decay=args.use_time_decay, use_adj=args.use_adj, use_topic_selection=args.use_topic_selection,
+            random_feat_dim=feat_dim)
         
         # Graph Denoising
         # features = torch.cat([torch.FloatTensor(tweet_aggy_feat),],dim=1)
@@ -500,7 +539,7 @@ def main():
             logger.info('   - (Testing)    scores: {scores}, elapse: {elapse:3.3f} min, gpu memory usage={mem:3.3f} MiB'.format(
                 scores=" ".join([f"{key}:{value:3.6f}" for key,value in scores.items()]),
                 elapse=(time.time()-start)/60, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
-            save_model(epoch_i, args, model, optimizer)
+            save_model(epoch_i, args, model, optimizer, filepath=os.path.join(DATA_ROOTPATH, f"basic/training/ckpt_model_{args.tensorboard_log}_epoch_{epoch_i}.pkl"))
             break
         
         if (epoch_i + 1) % args.check_point == 0:
@@ -514,8 +553,8 @@ def main():
             logger.info('   - (Testing)    scores: {scores}, elapse: {elapse:3.3f} min, gpu memory usage={mem:3.3f} MiB'.format(
                 scores=" ".join([f"{key}:{value:3.6f}" for key,value in scores.items()]),
                 elapse=(time.time()-start)/60, mem=check_gpu_memory_usage(int(args.gpu[-1]))))
-            save_model(epoch_i, args, model, optimizer)
-            
+            save_model(epoch_i, args, model, optimizer, filepath=os.path.join(DATA_ROOTPATH, f"basic/training/ckpt_model_{args.tensorboard_log}_epoch_{epoch_i}.pkl"))
+                
     logger.info("Total Elapse: {elapse:3.3f} min".format(elapse=(time.time()-t_total)/60))
 
 if __name__ == '__main__':

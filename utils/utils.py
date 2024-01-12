@@ -2,7 +2,7 @@
 # import sys
 # import os
 # sys.path.append(os.path.dirname(os.getcwd()))
-from lib.log import logger
+from utils.log import logger
 # from lib.utils import get_node_types, extend_edges, get_sparse_tensor
 import pickle
 import numpy as np
@@ -59,14 +59,16 @@ def check_gpu_memory_usage(gpu_id:int):
     memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
     return memory_free_values[gpu_id]
 
-def save_model(epoch, args, model, optimizer):
+def save_model(epoch, args, model, optimizer, filepath:str=None):
     state = {
         "epoch": epoch,
         "args": args,
         "model": model.state_dict(),
         "optimizer": optimizer.get_state_dict() if type(optimizer).__name__ == 'ScheduledOptim' else optimizer.state_dict()
     }
-    save_filepath = os.path.join(DATA_ROOTPATH, f"basic/training/ckpt_epoch_{epoch}_model_{args.model}.pkl")
+    save_filepath = filepath
+    if save_filepath is None:
+        save_filepath = os.path.join(DATA_ROOTPATH, f"basic/training/ckpt_epoch_{epoch}_model_{args.model}.pkl")
     torch.save(state, save_filepath)
     # help release GPU memory
     del state
@@ -128,6 +130,15 @@ def load_w2v_feature(file, max_idx=0):
     for item in feature:
         assert len(item) == d
     return np.array(feature, dtype=np.float32)
+
+def save_w2v_feature(file, feature):
+    n, d = feature.shape
+
+    with open(file, "wb") as f:
+        f.write(f"{n} {d}\n".encode())
+        for i, row in enumerate(feature):
+            line = ' '.join(str(num) for num in row)
+            f.write(f"{i} {line}\n".encode())
 
 def sample_docs_foreachuser(docs, user_tweet_mp, sample_frac=0.01, min_sample_num=3):
     sample_docs = []

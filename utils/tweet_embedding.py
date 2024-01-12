@@ -1,5 +1,5 @@
 from utils.utils import DATA_ROOTPATH, load_pickle, save_pickle, reduce_dimension, sample_docs_foreachuser, sample_docs_foreachuser2
-from lib.log import logger
+from utils.log import logger
 import random
 import os
 import numpy as np

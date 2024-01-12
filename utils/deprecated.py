@@ -1,4 +1,4 @@
-from lib.log import logger
+from utils.log import logger
 from lib.utils import get_node_types, extend_edges, get_sparse_tensor
 import numpy as np
 from typing import Dict, List

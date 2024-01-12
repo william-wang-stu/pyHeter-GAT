@@ -1,5 +1,5 @@
 from datetime import datetime
-from lib.log import logger
+from utils.log import logger
 from utils.utils import *
 
 def read_static_network():

@@ -1,5 +1,5 @@
 from utils.utils import load_pickle, save_pickle, flattern, DATA_ROOTPATH
-from lib.log import logger
+from utils.log import logger
 import igraph
 import os
 import random

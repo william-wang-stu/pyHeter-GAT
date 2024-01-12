@@ -1,5 +1,5 @@
 import numpy as np
-from lib.log import logger
+from utils.log import logger
 
 class EarlyStopping(object):
     def __init__(self, patience=10):

@@ -1,5 +1,5 @@
 from utils.utils import DATA_ROOTPATH, load_pickle, save_pickle
-from lib.log import logger
+from utils.log import logger
 from utils.graph import reindex_graph
 import matplotlib.pyplot as plt
 import numpy as np
