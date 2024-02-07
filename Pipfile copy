@@ -15,13 +15,15 @@ seaborn = "*"
 tensorboard-logger = "*"
 dgl = "*"
 tensorboard = "*"
+pyheter-gat = {editable = true, path = "."}
 numpy = "==1.23"
 bertopic = "*"
 tensorflow = "*"
 emoji = "*"
 protobuf = "==3.20.0"
+torch-sparse = "*"
+nvidia-ml-py3 = "*"
 torch-geometric = "*"
-openai = "*"
 
 [dev-packages]
 torch-tb-profiler = "*"

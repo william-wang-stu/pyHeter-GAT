@@ -43,6 +43,9 @@ pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 torchaudio==0.11.0 --e
 # conda install pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cudatoolkit=11.3 -c pytorch
 pip install -e .
 
+# torch_geometric Optional dependencies:
+pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
+
 # pipenv环境安装出现了不可复现的问题, 猜测和网络相关, 盯着它重试即可:D
 ```
 
