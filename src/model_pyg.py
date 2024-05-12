@@ -287,7 +287,7 @@ class HeterEdgeGATNetwork(nn.Module):
         n_units, n_heads, attn_dropout, dropout, instance_normalization=False, 
         # Ablation
         use_gat=True, use_time_decay=False, 
-        use_topic_pref=False, use_topic_selection=True, random_feat_dim=None,
+        use_add_attn=False, use_topic_selection=True, random_feat_dim=None,
     ):
         """
         shape_ret: (n_units[-1], #user)
@@ -322,11 +322,11 @@ class HeterEdgeGATNetwork(nn.Module):
         if self.use_time_decay:
             self.time_decay_emb = nn.Embedding(num_interval, n_adj)
         
-        self.use_topic_pref = use_topic_pref
+        self.use_add_attn = use_add_attn
         # TODO: 
-        if not self.use_topic_pref:
+        if self.use_add_attn:
             self.additive_attention = AdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
-            self.fc_attn = nn.Linear(n_units[-1]*(n_comp+1), n_units[-1])
+            self.fc_attn = nn.Linear(n_units[-1]*n_adj, n_units[-1])
         
         self.use_topic_selection = use_topic_selection
 
@@ -379,14 +379,14 @@ class HeterEdgeGATNetwork(nn.Module):
                 if multi_deepwalk_feat is None:
                     graph_emb = gat_network(hedge_graphs[heter_i], user_emb2)
                 else:
-                    graph_emb = gat_network(hedge_graphs[heter_i], multi_deepwalk_feat[:,:,heter_i].unsqueeze(1).expand(-1,self.n_head,-1).reshape(self.user_size,-1))
+                    graph_emb = gat_network(hedge_graphs[heter_i], multi_deepwalk_feat[:,:,heter_i].unsqueeze(1).expand(-1,self.n_heads[0],-1).reshape(self.user_size,-1))
                 heter_user_embs.append(graph_emb.unsqueeze(1))
             topic_aware_embs = torch.cat(heter_user_embs, dim=1)
             aware_seq_embs = F.embedding(cas_uids, topic_aware_embs.reshape(self.user_size,-1)).reshape(bs,ml,-1,topic_aware_embs.size(-1)) # (bs, max_len, |Rs|+1, D')
         else: # NOTE: Use GATNetwork2 with time_decay
             if self.use_time_decay:
                 time_decay_emb = self.time_decay_emb(cas_intervals) # (bs,ml,n_adj,d)
-            seq_embs = F.embedding(cas_uids, user_emb2).reshape(bs,ml,self.n_head,-1)
+            seq_embs = F.embedding(cas_uids, user_emb2).reshape(bs,ml,self.n_heads[0],-1)
 
             # if multi_deepwalk_feat is not None:
             #     full_seq_embs = F.embedding(cas_uids, multi_deepwalk_feat.reshape(self.user_size,-1)).unsqueeze(2).expand(-1,-1,self.n_head,-1).reshape(bs,ml,self.n_head,len(hedge_graphs),-1)
@@ -421,7 +421,7 @@ class HeterEdgeGATNetwork(nn.Module):
         # use topic selection and preference fusion
         if not self.use_topic_selection:
             aware_seq_embs = torch.mean(aware_seq_embs, dim=2)
-        if not self.use_topic_pref:
+        if self.use_add_attn:
             user_seq_embs = F.embedding(cas_uids, user_emb2)
             user_seq_embs = user_seq_embs.view(-1,user_seq_embs.size(-1)) # (bs*max_len, D)
             aware_seq_embs = aware_seq_embs.view(bs*ml,-1,-1)

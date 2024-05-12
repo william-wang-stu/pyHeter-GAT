@@ -65,10 +65,10 @@ parser.add_argument('--use-gat', type=int, default=1, help="Use GAT as Backbone"
 parser.add_argument('--use-time-decay', type=int, default=1, help="Use Time Embedding")
 # parser.add_argument('--use-topic-selection', type=int, default=1, help="")
 parser.add_argument('--use-motif', action='store_true', default=False, help="Use Motif-Enhanced Graph")
-parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
+# parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
 # parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
 # parser.add_argument('--unified-dim', type=int, default=128, help='Unified Dimension of Different Feature Spaces.')
-# parser.add_argument('--d_model', type=int, default=64, help='Options in ScheduledOptim')
+parser.add_argument('--d_model', type=int, default=64, help='Options in ScheduledOptim')
 parser.add_argument('--n_warmup_steps', type=int, default=1000, help='Options in ScheduledOptim')
 parser.add_argument('--patience', type=int, default=10, help='Patience Steps of EarlyStopping')
 # >> Graph Denoising
@@ -90,12 +90,12 @@ parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropou
 parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
 parser.add_argument('--heads', type=str, default="4,4", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
+parser.add_argument('--gpu', type=str, default="cuda:8", help="Select GPU")
 parser.add_argument('--graph-topk', type=int, default=20, help="")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', type=int, default=0, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 parser.add_argument('--use-multi-deepwalk-feat', action='store_true', default=False, help="Use Multi-Heter Deepwalk-Feature if set true (Available only when model='heteredgegat')")
-parser.add_argument('--use-adj', type=int, default=1, help="Use Adj Matrix to Mask Attn if set true (Available only when model='heteredgegat')")
+# parser.add_argument('--use-adj', type=int, default=1, help="Use Adj Matrix to Mask Attn if set true (Available only when model='heteredgegat')")
 # >> Comparison(New)
 parser.add_argument('--tweet2vec', type=int, default=0, help="Utilize texts as feat vectors (No rel. with whether to use textual diffusion channels)")
 parser.add_argument('--tweet2graph', type=int, default=1, help="Utilize texts as textual graphs")
@@ -445,13 +445,13 @@ def main():
 
         # TODO: gat 实际上应该用同等的参数量
         n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
+        use_add_attn = False
         use_topic_selection = args.n_component is not None
         random_feat_dim = train_d['feat'].size(1) if train_d['feat'] is not None else None
-        model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_adj, 
-            n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
-            attn_dropout=args.attn_dropout, dropout=args.dropout, 
+        model = HeterEdgeGATNetwork(user_size=train_data.user_size, n_feat=n_feat, n_adj=n_adj, num_interval=args.n_interval, n_comp=args.n_component, 
+            n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout, 
             use_gat=args.use_gat, use_time_decay=args.use_time_decay, 
-            use_topic_pref=args.use_topic_preference, use_topic_selection=use_topic_selection, random_feat_dim=random_feat_dim)
+            use_add_attn=use_add_attn, use_topic_selection=use_topic_selection, random_feat_dim=random_feat_dim)
         
         # Graph Denoising
         # features = torch.cat([torch.FloatTensor(tweet_aggy_feat),],dim=1)
