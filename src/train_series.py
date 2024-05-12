@@ -99,7 +99,7 @@ parser.add_argument('--use-adj', type=int, default=1, help="Use Adj Matrix to Ma
 parser.add_argument('--tweet2vec', type=int, default=0, help="Utilize texts as feat vectors (No rel. with whether to use textual diffusion channels)")
 parser.add_argument('--tweet2graph', type=int, default=1, help="Utilize texts as textual graphs")
 parser.add_argument('--use-random-vec', type=int, default=1, help="Use Random Vectors (Otherwise use User-Feats or User+Tweet-Feats)")
-parser.add_argument('--sparsity', type=int, default=100, help='Sparsity Comparison (0-100)')
+parser.add_argument('--sparsity', type=int, default=50, help='Sparsity Comparison (0-100)')
 
 args = parser.parse_args()
 args.cuda = torch.cuda.is_available()
@@ -342,9 +342,15 @@ def main():
     n_units = [int(x) for x in args.hidden_units.strip().split(",")]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
 
-    train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=0, load_dict=True)
-    valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=1, load_dict=True)
-    test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, tmax=args.tmax, num_interval=args.n_interval, n_component=args.n_component, data_type=2, load_dict=True)
+    train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, 
+                               tmax=args.tmax, num_interval=args.n_interval, 
+                               n_component=args.n_component, data_type=0, sparsity=args.sparsity, load_dict=True)
+    valid_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, 
+                               tmax=args.tmax, num_interval=args.n_interval, 
+                               n_component=args.n_component, data_type=1, sparsity=args.sparsity, load_dict=True)
+    test_data  = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, 
+                               tmax=args.tmax, num_interval=args.n_interval, 
+                               n_component=args.n_component, data_type=2, sparsity=args.sparsity, load_dict=True)
 
     train_d = {'batch': train_data}; valid_d = {'batch': valid_data}; test_d = {'batch': test_data}
 

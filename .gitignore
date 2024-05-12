@@ -6,6 +6,5 @@ nohup.out
 *.pkl
 *.p
 *.ini
-*.ipynb
 test*.py
 *.png

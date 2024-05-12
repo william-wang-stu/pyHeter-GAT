@@ -122,7 +122,9 @@ class DataConstruct(object):
     ''' For data iteration '''
 
     def __init__(
-            self, dataset_dirpath, batch_size, seed, tmax, num_interval, n_component=None, data_type=0, load_dict=True, shuffle=True, append_EOS=True
+            self, dataset_dirpath, batch_size, seed, tmax, num_interval, 
+            n_component=None, data_type=0, sparsity=100,
+            load_dict=True, shuffle=True, append_EOS=True
         ): # data_type=0(train), =1(valid), =2(test)
         self.batch_size = batch_size
         self.seed = seed
@@ -158,6 +160,16 @@ class DataConstruct(object):
         if self.shuffle:
             random.seed(self.seed)
             random.shuffle(self._train_data)
+        
+        if sparsity < 100:
+            logger.info("[Sparsity] before... train={}, valid={}, test={}".format(
+                len(self._train_data), len(self._valid_data), len(self._test_data)))
+            sparsity /= 100
+            self._train_data = np.random.choice(self._train_data, size=int(sparsity*len(self._train_data)))
+            self._valid_data = np.random.choice(self._valid_data, size=int(sparsity*len(self._valid_data)))
+            self._test_data  = np.random.choice(self._test_data,  size=int(sparsity*len(self._test_data)))
+            logger.info("[Sparsity] after... train={}, valid={}, test={}".format(
+                len(self._train_data), len(self._valid_data), len(self._test_data)))
         
         if self.data_type == 0:
             self.num_batch = int(np.ceil(len(self._train_data) / self.batch_size))
