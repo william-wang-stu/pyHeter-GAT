@@ -157,6 +157,7 @@ class DataConstruct(object):
         self._train_data, _train_data_len = self._readCascadeFromFile2(train_data_filepath, min_user=2, max_user=500, use_u2idx=use_u2idx)
         self._valid_data, _valid_data_len = self._readCascadeFromFile2(valid_data_filepath, min_user=2, max_user=500, use_u2idx=use_u2idx)
         self._test_data,  _test_data_len  = self._readCascadeFromFile2(test_data_filepath,  min_user=2, max_user=500, use_u2idx=use_u2idx)
+        
         if self.shuffle:
             random.seed(self.seed)
             random.shuffle(self._train_data)
@@ -230,19 +231,20 @@ class DataConstruct(object):
     def _readCascadeFromFile2(self, filename, min_user=2, max_user=500, use_u2idx=True):
         """read all cascade from training or testing files. """
         per_interval = self.tmax / self.num_interval
+        per_interval *= 24 * 3600 # tmax is in days
 
         total_len = 0
         cascade_data = []
         data_dict = load_pickle(filename)
 
         for tag, cascades in data_dict.items():
+            userlist = list(cascades['user'])
             if use_u2idx:
-                userlist = [self._u2idx[elem] for elem in cascades['user']]
-            else:
-                userlist = list(cascades['user'])
+                userlist = [self._u2idx[elem] for elem in userlist]
             tslist = list(cascades['ts'])
 
-            intervallist = list(np.ceil((tslist[-1]-np.array(tslist))/(per_interval*3600)))
+            intervallist = list(np.ceil(
+                (tslist[-1] - np.array(tslist)) / per_interval))
             for idx, interval in enumerate(intervallist):
                 if interval >= self.num_interval:
                     intervallist[idx] = self.num_interval-1

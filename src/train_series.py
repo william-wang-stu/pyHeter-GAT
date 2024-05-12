@@ -53,32 +53,32 @@ parser.add_argument('--class-weight-balanced', action='store_true', default=True
 # >> Preprocess
 parser.add_argument('--min-user-participate', type=int, default=2, help="Min User Participate in One Cascade")
 parser.add_argument('--max-user-participate', type=int, default=500, help="Max User Participate in One Cascade")
-parser.add_argument('--train-ratio', type=float, default=0.8, help="Training ratio (0, 1)")
-parser.add_argument('--valid-ratio', type=float, default=0.1, help="Validation ratio (0, 1)")
-# >> Model
+# parser.add_argument('--train-ratio', type=float, default=0.8, help="Training ratio (0, 1)")
+# parser.add_argument('--valid-ratio', type=float, default=0.1, help="Validation ratio (0, 1)")
 parser.add_argument('--tmax', type=int, default=120, help="Max Time in the Observation Window")
 parser.add_argument('--n-interval', type=int, default=40, help="Number of Time Intervals in the Observation Window")
-parser.add_argument('--n-component', type=int, default=3, help="Number of Prominent Component Topic Classes Foreach Topic")
-parser.add_argument('--window-size', type=int, default=200, help="Window Size of Building Topical Edges")
+parser.add_argument('--n-component', type=int, default=None, help="Number of Prominent Component Topic Classes Foreach Topic")
+# >> Model
+parser.add_argument('--window-size', type=int, default=7, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--use-gat', type=int, default=1, help="Use GAT as Backbone")
 parser.add_argument('--use-time-decay', type=int, default=1, help="Use Time Embedding")
-parser.add_argument('--use-topic-selection', type=int, default=1, help="Use Time Embedding")
+# parser.add_argument('--use-topic-selection', type=int, default=1, help="")
 parser.add_argument('--use-motif', action='store_true', default=False, help="Use Motif-Enhanced Graph")
 parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
-parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
-parser.add_argument('--unified-dim', type=int, default=128, help='Unified Dimension of Different Feature Spaces.')
-parser.add_argument('--d_model', type=int, default=64, help='Options in ScheduledOptim')
+# parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
+# parser.add_argument('--unified-dim', type=int, default=128, help='Unified Dimension of Different Feature Spaces.')
+# parser.add_argument('--d_model', type=int, default=64, help='Options in ScheduledOptim')
 parser.add_argument('--n_warmup_steps', type=int, default=1000, help='Options in ScheduledOptim')
 parser.add_argument('--patience', type=int, default=10, help='Patience Steps of EarlyStopping')
 # >> Graph Denoising
-parser.add_argument('--type_learner', type=str, default='fgp', choices=["fgp", "att", "mlp", "gnn"])
-parser.add_argument('--k', type=int, default=30)
-parser.add_argument('--sim_function', type=str, default='cosine', choices=['cosine', 'minkowski'])
-parser.add_argument('--gamma', type=float, default=0.9)
-parser.add_argument('--activation_learner', type=str, default='relu', choices=["relu", "tanh"])
-parser.add_argument('--sparse', type=int, default=0)
-parser.add_argument('--use-diffusion-graph', action='store_true', default=True, help="Use Diffusion Graph")
+# parser.add_argument('--type_learner', type=str, default='fgp', choices=["fgp", "att", "mlp", "gnn"])
+# parser.add_argument('--k', type=int, default=30)
+# parser.add_argument('--sim_function', type=str, default='cosine', choices=['cosine', 'minkowski'])
+# parser.add_argument('--gamma', type=float, default=0.9)
+# parser.add_argument('--activation_learner', type=str, default='relu', choices=["relu", "tanh"])
+# parser.add_argument('--sparse', type=int, default=0)
+# parser.add_argument('--use-diffusion-graph', action='store_true', default=True, help="Use Diffusion Graph")
 # >> Hyper-Param
 parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train.')
 parser.add_argument('--batch-size', type=int, default=32, help='Number of epochs to train.')
@@ -91,6 +91,7 @@ parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden un
 parser.add_argument('--heads', type=str, default="4,4", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--gpu', type=str, default="cuda:1", help="Select GPU")
+parser.add_argument('--graph-topk', type=int, default=20, help="")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', type=int, default=0, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 parser.add_argument('--use-multi-deepwalk-feat', action='store_true', default=False, help="Use Multi-Heter Deepwalk-Feature if set true (Available only when model='heteredgegat')")
@@ -98,16 +99,16 @@ parser.add_argument('--use-adj', type=int, default=1, help="Use Adj Matrix to Ma
 # >> Comparison(New)
 parser.add_argument('--tweet2vec', type=int, default=0, help="Utilize texts as feat vectors (No rel. with whether to use textual diffusion channels)")
 parser.add_argument('--tweet2graph', type=int, default=1, help="Utilize texts as textual graphs")
-parser.add_argument('--use-random-vec', type=int, default=1, help="Use Random Vectors (Otherwise use User-Feats or User+Tweet-Feats)")
-parser.add_argument('--sparsity', type=int, default=50, help='Sparsity Comparison (0-100)')
+parser.add_argument('--use-random-vec', type=int, default=0, help="Use Random Vectors (Otherwise use User-Feats or User+Tweet-Feats)")
+parser.add_argument('--sparsity', type=int, default=100, help='Sparsity Comparison (0-100)')
 
 args = parser.parse_args()
 args.cuda = torch.cuda.is_available()
 args.use_gat = args.use_gat == 1
 args.use_time_decay = args.use_time_decay == 1
-args.use_adj = args.use_adj == 1
-args.use_k_adj = args.use_adj == 2
-args.use_topic_selection = args.use_topic_selection == 1
+# args.use_adj = args.use_adj == 1
+# args.use_k_adj = args.use_adj == 2
+# args.use_topic_selection = args.n_component is not None
 logger.info(f"Args: {args}")
 
 np.random.seed(args.seed)
@@ -172,9 +173,9 @@ def get_scores2(opt, pred_cascade:torch.Tensor, gold_cascade:torch.Tensor, k_lis
 def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='train_'):
     model.train()
 
-    if args.model == 'heteredgegat' and not args.use_diffusion_graph:
-        data['graph_learner'].train()
-        data['optimizer_learner'].zero_grad()
+    # if args.model == 'heteredgegat' and not args.use_diffusion_graph:
+    #     data['graph_learner'].train()
+    #     data['optimizer_learner'].zero_grad()
     
     loss, correct, total = 0., 0., 0.
     for _, batch in enumerate(data['batch']):
@@ -226,8 +227,8 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
         correct += n_correct.item()
         total += n_words
     
-    if args.model == 'heteredgegat' and not args.use_diffusion_graph:
-        data['optimizer_learner'].step()
+    # if args.model == 'heteredgegat' and not args.use_diffusion_graph:
+    #     data['optimizer_learner'].step()
     
     writer.add_scalar(log_desc+'loss', loss/total, epoch_i+1)
     writer.add_scalar(log_desc+'acc',  n_correct/total, epoch_i+1)
@@ -237,8 +238,8 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
 def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[10,50,100], log_desc='valid_'):
     model.eval()
 
-    if args.model == 'heteredgegat' and not args.use_diffusion_graph:
-        data['graph_learner'].eval()
+    # if args.model == 'heteredgegat' and not args.use_diffusion_graph:
+    #     data['graph_learner'].eval()
     
     loss, correct, total = 0., 0., 0.
     scores = {'MRR': 0,}
@@ -302,8 +303,8 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
             scores[f'map@{k}'] += scores_batch[f'map@{k}'] * n_words
     
     model.train()
-    if args.model == 'heteredgegat' and not args.use_diffusion_graph:
-        data['graph_learner'].train()
+    # if args.model == 'heteredgegat' and not args.use_diffusion_graph:
+    #     data['graph_learner'].train()
     
     scores['MRR'] /= total
     for k in k_list:
@@ -342,6 +343,7 @@ def main():
     n_units = [int(x) for x in args.hidden_units.strip().split(",")]
     n_heads = [int(x) for x in args.heads.strip().split(",")]
 
+    # NOTE: set `load_dict=True` for all datasets
     train_data = DataConstruct(dataset_dirpath=dataset_dirpath, batch_size=args.batch_size, seed=args.seed, 
                                tmax=args.tmax, num_interval=args.n_interval, 
                                n_component=args.n_component, data_type=0, sparsity=args.sparsity, load_dict=True)
@@ -367,6 +369,7 @@ def main():
         graph = graph.to(args.gpu)
     
     # Use Manual Feats or Random Feats
+    new_d = {'feat': None}
     if args.use_random_vec == 0:
         vertex_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/vertex_feature_user{train_data.user_size}.npy"))
         three_sort_feat = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/feature/three_sort_feature_user{train_data.user_size}.npy"))
@@ -385,9 +388,6 @@ def main():
             user_side_emb = torch.cat([user_side_emb, tweet_side_emb], dim=1)
         
         new_d = {'feat': user_side_emb}
-    else:
-        new_d = {'feat': None}
-    feat_dim = new_d['feat'].size(1) if new_d['feat'] is not None else None
     train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
     # TODO: decide on n_feat
@@ -405,22 +405,31 @@ def main():
         else:
             base_filename += "_full"
         
-        if args.sparsity == 100:
-            sparsity_suffix = ""
-        else:
+        sparsity_suffix = ""
+        if args.sparsity < 100:
             sparsity_suffix = f"_sparsity{args.sparsity}.0"
         
-        classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_graph/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
-        if args.cuda:
-            classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
+        # classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_graph/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
+        classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_llm2/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
+        # if args.cuda:
+        #     classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
         
-        n_adj = max(classid2simmat.keys())+1
+        # n_adj = max(classid2simmat.keys())+1
+        n_adj = len(classid2simmat)
         if args.tweet2graph == 0:
             # hedge_graphs = [graph] * (n_adj+1)
             hedge_graphs = [graph] * n_adj
         else:
-            # hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)] + [graph]
-            hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)]
+            # hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)]
+            
+            # select topk interest graphs
+            topk = args.graph_topk
+            clasid2len = {k: len(v) for k,v in classid2simmat.items()}
+            for k in sorted(clasid2len, key=clasid2len.get, reverse=True)[topk:]:
+                classid2simmat.pop(k)
+            hedge_graphs = [graph for _, graph in classid2simmat.items()]
+            if args.cuda:
+                hedge_graphs = [graph.to(args.gpu) for graph in hedge_graphs]
         
         # diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
         # if args.cuda:
@@ -434,11 +443,15 @@ def main():
         #     if args.cuda:
         #         user_topic_preference = user_topic_preference.to(args.gpu)
 
+        # TODO: gat 实际上应该用同等的参数量
         n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
-        model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_adj, n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
-            attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat, use_topic_pref=args.use_topic_preference, 
-            use_time_decay=args.use_time_decay, use_adj=args.use_adj, use_topic_selection=args.use_topic_selection,
-            random_feat_dim=feat_dim)
+        use_topic_selection = args.n_component is not None
+        random_feat_dim = train_d['feat'].size(1) if train_d['feat'] is not None else None
+        model = HeterEdgeGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, n_adj=n_adj, 
+            n_comp=args.n_component, num_interval=args.n_interval, shape_ret=(-1,train_data.user_size), 
+            attn_dropout=args.attn_dropout, dropout=args.dropout, 
+            use_gat=args.use_gat, use_time_decay=args.use_time_decay, 
+            use_topic_pref=args.use_topic_preference, use_topic_selection=use_topic_selection, random_feat_dim=random_feat_dim)
         
         # Graph Denoising
         # features = torch.cat([torch.FloatTensor(tweet_aggy_feat),],dim=1)
