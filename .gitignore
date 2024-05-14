@@ -8,3 +8,4 @@ nohup.out
 *.ini
 test*.py
 *.png
+events.out.tfevents.*

@@ -305,10 +305,10 @@ class HeterEdgeGATNetwork(nn.Module):
 
         # Model
         last_dim = n_units[-1] if not use_gat else n_units[-1]*n_heads[-1]
-        last_dim += pos_emb_dim
-        self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=last_dim)
-        self.decoder_attention = TransformerBlock(input_size=last_dim, n_heads=8)
-        self.fc_network = nn.Linear(last_dim, user_size)
+        last_dim_with_pos = last_dim + pos_emb_dim
+        self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=last_dim_with_pos)
+        self.decoder_attention = TransformerBlock(input_size=last_dim_with_pos, n_heads=8)
+        self.fc_network = nn.Linear(last_dim_with_pos, user_size)
         self.init_weights()
         
         # Ablation
@@ -323,10 +323,9 @@ class HeterEdgeGATNetwork(nn.Module):
             self.time_decay_emb = nn.Embedding(num_interval, n_adj)
         
         self.use_add_attn = use_add_attn
-        # TODO: 
         if self.use_add_attn:
-            self.additive_attention = AdditiveAttention(d=n_feat, d1=n_units[-1], d2=n_units[-1])
-            self.fc_attn = nn.Linear(n_units[-1]*n_adj, n_units[-1])
+            self.additive_attention = AdditiveAttention(d=n_feat, d1=last_dim, d2=last_dim)
+            # self.fc_attn = nn.Linear(n_units[-1]*n_adj, n_units[-1])
         
         self.use_topic_selection = use_topic_selection
 
@@ -418,18 +417,18 @@ class HeterEdgeGATNetwork(nn.Module):
                 heter_user_embs.append(graph_emb.unsqueeze(-2))
             aware_seq_embs = torch.cat(heter_user_embs, dim=-2) # (bs,ml,K,D')
         
-        # use topic selection and preference fusion
-        if not self.use_topic_selection:
-            aware_seq_embs = torch.mean(aware_seq_embs, dim=2)
+        # use preference fusion
         if self.use_add_attn:
             user_seq_embs = F.embedding(cas_uids, user_emb2)
             user_seq_embs = user_seq_embs.view(-1,user_seq_embs.size(-1)) # (bs*max_len, D)
-            aware_seq_embs = aware_seq_embs.view(bs*ml,-1,-1)
+            aware_seq_embs = aware_seq_embs.view(bs*ml,-1,aware_seq_embs.size(-1)) # (bs*max_len, n_comp, D')
             assert user_seq_embs.size(0) == aware_seq_embs.size(0)
             fusion_seq_embs = self.additive_attention(user_seq_embs, aware_seq_embs) # (bs*max_len, 1, D')
             # NOTE: use fusion_seq_embs instead of mean pooling
-            aware_seq_embs = torch.cat((aware_seq_embs, fusion_seq_embs),dim=1) # (bs, max_len, (n_comp+1)*D')
-            aware_seq_embs = torch.mean(aware_seq_embs, dim=2)
+            aware_seq_embs = torch.cat((aware_seq_embs, fusion_seq_embs),dim=1)
+            aware_seq_embs = aware_seq_embs.reshape(bs, ml, -1, aware_seq_embs.size(-1)) # (bs, max_len, n_comp+1, D')
+        aware_seq_embs = torch.mean(aware_seq_embs, dim=2)
+        
         seq_embs = F.dropout(aware_seq_embs, self.dropout)
 
         batch_t = torch.arange(cas_uids.size(1)).expand(cas_uids.size()).to(cas_uids.device)

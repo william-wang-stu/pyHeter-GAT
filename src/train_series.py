@@ -59,12 +59,14 @@ parser.add_argument('--tmax', type=int, default=120, help="Max Time in the Obser
 parser.add_argument('--n-interval', type=int, default=40, help="Number of Time Intervals in the Observation Window")
 parser.add_argument('--n-component', type=int, default=None, help="Number of Prominent Component Topic Classes Foreach Topic")
 # >> Model
+parser.add_argument('--graph-filename', type=str, default="full", help="")
 parser.add_argument('--window-size', type=int, default=7, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--use-gat', type=int, default=1, help="Use GAT as Backbone")
 parser.add_argument('--use-time-decay', type=int, default=1, help="Use Time Embedding")
 # parser.add_argument('--use-topic-selection', type=int, default=1, help="")
 parser.add_argument('--use-motif', action='store_true', default=False, help="Use Motif-Enhanced Graph")
+parser.add_argument('--use-add-attn', action='store_true', default=False, help="")
 # parser.add_argument('--use-topic-preference', action='store_true', default=False, help="Use Hand-crafted Topic Preference Weights to Aggregate topic-enhanced graph embeds")
 # parser.add_argument('--use-tweet-feat', action='store_true', default=False, help="Use Tweet-Side Feat Aggregated From Tag Embeddings")
 # parser.add_argument('--unified-dim', type=int, default=128, help='Unified Dimension of Different Feature Spaces.')
@@ -390,7 +392,6 @@ def main():
         new_d = {'feat': user_side_emb}
     train_d.update(new_d); valid_d.update(new_d); test_d.update(new_d)
 
-    # TODO: decide on n_feat
     if args.model == 'densegat':
         n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
         model = BasicGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_feat,train_data.user_size), 
@@ -403,7 +404,8 @@ def main():
         elif args.use_motif:
             base_filename = "topic_diffusion_motif_graph"
         else:
-            base_filename += "_full"
+            # base_filename += "_full"
+            base_filename += "_{}".format(args.graph_filename)
         
         sparsity_suffix = ""
         if args.sparsity < 100:
@@ -443,9 +445,9 @@ def main():
         #     if args.cuda:
         #         user_topic_preference = user_topic_preference.to(args.gpu)
 
-        # TODO: gat 实际上应该用同等的参数量
-        n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
-        use_add_attn = False
+        n_feat = n_units[0] * n_heads[0]
+        n_units = [nu * nh for nu, nh in zip(n_units, n_heads)] if not args.use_gat else n_units
+        use_add_attn = args.use_add_attn
         use_topic_selection = args.n_component is not None
         random_feat_dim = train_d['feat'].size(1) if train_d['feat'] is not None else None
         model = HeterEdgeGATNetwork(user_size=train_data.user_size, n_feat=n_feat, n_adj=n_adj, num_interval=args.n_interval, n_comp=args.n_component, 
