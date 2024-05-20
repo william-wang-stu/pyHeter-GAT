@@ -45,7 +45,7 @@ logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimesta
 parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--dataset', type=str, default='Twitter-Huangxin', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
+parser.add_argument('--dataset', type=str, default='Weibo-Aminer', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
 parser.add_argument('--model', type=str, default='heteredgegat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
@@ -59,7 +59,7 @@ parser.add_argument('--tmax', type=int, default=120, help="Max Time in the Obser
 parser.add_argument('--n-interval', type=int, default=40, help="Number of Time Intervals in the Observation Window")
 parser.add_argument('--n-component', type=int, default=None, help="Number of Prominent Component Topic Classes Foreach Topic")
 # >> Model
-parser.add_argument('--graph-filename', type=str, default="full", help="")
+parser.add_argument('--graph-filename', type=str, default="seed_user", help="")
 parser.add_argument('--window-size', type=int, default=7, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--use-gat', type=int, default=1, help="Use GAT as Backbone")
@@ -417,7 +417,8 @@ def main():
         #     classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
         
         # n_adj = max(classid2simmat.keys())+1
-        n_adj = len(classid2simmat)
+        topk = args.graph_topk
+        n_adj = min(len(classid2simmat), topk)
         if args.tweet2graph == 0:
             # hedge_graphs = [graph] * (n_adj+1)
             hedge_graphs = [graph] * n_adj
@@ -425,13 +426,13 @@ def main():
             # hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)]
             
             # select topk interest graphs
-            topk = args.graph_topk
             clasid2len = {k: len(v) for k,v in classid2simmat.items()}
             for k in sorted(clasid2len, key=clasid2len.get, reverse=True)[topk:]:
                 classid2simmat.pop(k)
             hedge_graphs = [graph for _, graph in classid2simmat.items()]
             if args.cuda:
                 hedge_graphs = [graph.to(args.gpu) for graph in hedge_graphs]
+            logger.info(len(hedge_graphs))
         
         # diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
         # if args.cuda:
