@@ -59,7 +59,7 @@ parser.add_argument('--tmax', type=int, default=120, help="Max Time in the Obser
 parser.add_argument('--n-interval', type=int, default=40, help="Number of Time Intervals in the Observation Window")
 parser.add_argument('--n-component', type=int, default=None, help="Number of Prominent Component Topic Classes Foreach Topic")
 # >> Model
-parser.add_argument('--graph-filename', type=str, default="seed_user", help="")
+parser.add_argument('--graph-filename', type=str, default="full", help="")
 parser.add_argument('--window-size', type=int, default=7, help="Window Size of Building Topical Edges")
 parser.add_argument('--instance-normalization', action='store_true', default=False, help="Enable instance normalization")
 parser.add_argument('--use-gat', type=int, default=1, help="Use GAT as Backbone")
