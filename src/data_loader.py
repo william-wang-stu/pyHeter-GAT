@@ -154,6 +154,7 @@ class DataConstruct(object):
             logger.info(f"User Size={self.user_size}")
         
         use_u2idx = dataset_dirpath.split('/')[-1] == 'Weibo-Aminer'
+        # use_u2idx = True
         self._train_data, _train_data_len = self._readCascadeFromFile2(train_data_filepath, min_user=2, max_user=500, use_u2idx=use_u2idx)
         self._valid_data, _valid_data_len = self._readCascadeFromFile2(valid_data_filepath, min_user=2, max_user=500, use_u2idx=use_u2idx)
         self._test_data,  _test_data_len  = self._readCascadeFromFile2(test_data_filepath,  min_user=2, max_user=500, use_u2idx=use_u2idx)

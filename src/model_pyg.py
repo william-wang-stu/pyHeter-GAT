@@ -189,7 +189,7 @@ class TimeAttention_New(nn.Module):
 
 class BasicGATNetwork(nn.Module):
     def __init__(self, n_feat, n_units, n_heads, num_interval, shape_ret,
-        attn_dropout, dropout, instance_normalization=False,
+        attn_dropout, dropout, instance_normalization=False, use_gat=False
     ):
         """
         shape_ret: (n_units[-1], #user)
@@ -201,7 +201,10 @@ class BasicGATNetwork(nn.Module):
         
         self.user_size = shape_ret[1]
         self.user_emb = nn.Embedding(self.user_size, n_feat, padding_idx=PAD)
-        self.gat_network = GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout)
+        if use_gat:
+            self.gat_network = GATNetwork(n_feat, n_units, n_heads, attn_dropout, dropout)
+        else:
+            self.gat_network = GCNNetwork(n_feat, n_units, dropout)
         self.time_attention = TimeAttention_New(ninterval=num_interval, nfeat=shape_ret[0])
         self.fc_network = nn.Linear(shape_ret[0], shape_ret[1])
         self.init_weights()
@@ -364,7 +367,7 @@ class HeterEdgeGATNetwork(nn.Module):
         # assert multi_deepwalk_feat.size() == [self.user_size, self.user_emb.embedding_dim//self.n_head, len(hedge_graphs)]
 
         # prepare input embeddings
-        if not self.use_random_feat:
+        if self.use_random_feat:
         # if feats is None:
             user_emb2 = self.user_emb(torch.tensor([i for i in range(self.user_size)]).to(cas_uids.device))
         else:

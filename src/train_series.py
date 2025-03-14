@@ -25,6 +25,8 @@ from src.sota.DHGPNTM.DyHGCN import DyHGCN_H
 from src.sota.DHGPNTM.DataConstruct import LoadDynamicHeteGraph
 from src.sota.FOREST.model import RNNModel
 from src.sota.NDM.transformer.Models import Decoder
+from src.sota.HiDAN.model import HiDANModel
+from src.sota.HiDAN.config import Config
 import numpy as np
 import argparse
 import shutil
@@ -45,7 +47,7 @@ logger.info(f"Reading From config.ini... DATA_ROOTPATH={DATA_ROOTPATH}, Ntimesta
 parser = argparse.ArgumentParser()
 # >> Constant
 parser.add_argument('--tensorboard-log', type=str, default='exp', help="name of this run")
-parser.add_argument('--dataset', type=str, default='Weibo-Aminer', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
+parser.add_argument('--dataset', type=str, default='Twitter-Huangxin', help="available options are ['Weibo-Aminer','Twitter-Huangxin']")
 parser.add_argument('--model', type=str, default='heteredgegat', help="available options are ['densegat','heteredgegat','diffusiongat','dhgpntm']")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--shuffle', action='store_true', default=True, help="Shuffle dataset")
@@ -89,11 +91,11 @@ parser.add_argument('--lr', type=float, default=3e-2, help='Initial learning rat
 parser.add_argument('--weight-decay', type=float, default=5e-4, help='Weight decay (L2 loss on parameters).')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate (1 - keep probability).')
 parser.add_argument('--attn-dropout', type=float, default=0.0, help='Attn Dropout rate (1 - keep probability).')
-parser.add_argument('--hidden-units', type=str, default="16,16", help="Hidden units in each hidden layer, splitted with comma")
-parser.add_argument('--heads', type=str, default="4,4", help="Heads in each layer, splitted with comma")
+parser.add_argument('--hidden-units', type=str, default="16", help="Hidden units in each hidden layer, splitted with comma")
+parser.add_argument('--heads', type=str, default="4", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
-parser.add_argument('--gpu', type=str, default="cuda:8", help="Select GPU")
-parser.add_argument('--graph-topk', type=int, default=20, help="")
+parser.add_argument('--gpu', type=str, default="cuda:0", help="Select GPU")
+parser.add_argument('--graph-topk', type=int, default=2, help="")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', type=int, default=0, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 parser.add_argument('--use-multi-deepwalk-feat', action='store_true', default=False, help="Use Multi-Heter Deepwalk-Feature if set true (Available only when model='heteredgegat')")
@@ -101,7 +103,7 @@ parser.add_argument('--use-multi-deepwalk-feat', action='store_true', default=Fa
 # >> Comparison(New)
 parser.add_argument('--tweet2vec', type=int, default=0, help="Utilize texts as feat vectors (No rel. with whether to use textual diffusion channels)")
 parser.add_argument('--tweet2graph', type=int, default=1, help="Utilize texts as textual graphs")
-parser.add_argument('--use-random-vec', type=int, default=0, help="Use Random Vectors (Otherwise use User-Feats or User+Tweet-Feats)")
+parser.add_argument('--use-random-vec', type=int, default=1, help="Use Random Vectors (Otherwise use User-Feats or User+Tweet-Feats)")
 parser.add_argument('--sparsity', type=int, default=100, help='Sparsity Comparison (0-100)')
 
 args = parser.parse_args()
@@ -214,7 +216,10 @@ def train(epoch_i, data, graph, model, optimizer, loss_func, writer, log_desc='t
             pred_cascade, _ = model(cas_users)
         elif args.model == 'ndm':
             pred_cascade = model(cas_users)
-            pred_cascade = pred_cascade[0]
+        elif args.model == 'hidan':
+            pred_cascade = model(cas_users, cas_intervals)
+
+        # scores_batch = get_scores(pred_cascade, gold_cascade, [10])
         
         if args.model == 'tan':
             loss_batch, _, n_correct, _ = get_performance2(data['opt'], loss_func, pred_cascade, gold_cascade)
@@ -244,7 +249,7 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
     #     data['graph_learner'].eval()
     
     loss, correct, total = 0., 0., 0.
-    scores = {'MRR': 0,}
+    scores = {'MRR': 0, 'F1': 0, 'prec': 0, 'rec': 0}
     for k in k_list:
         scores[f'hits@{k}'] = 0
         scores[f'map@{k}'] = 0
@@ -283,6 +288,8 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         elif args.model == 'ndm':
             pred_cascade = model(cas_users)
             pred_cascade = pred_cascade[0]
+        elif args.model == 'hidan':
+            pred_cascade = model(cas_users, cas_intervals)
         
         if args.model == 'tan':
             loss_batch, _, n_correct, _ = get_performance2(data['opt'], loss_func, pred_cascade, gold_cascade)
@@ -299,6 +306,9 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         else:
             scores_batch = get_scores(pred_cascade, gold_cascade, k_list)
         
+        scores['prec'] += scores_batch['prec'] * n_words
+        scores['rec'] += scores_batch['rec'] * n_words
+        scores['F1'] += scores_batch['F1'] * n_words
         scores['MRR'] += scores_batch['MRR'] * n_words
         for k in k_list:
             scores[f'hits@{k}'] += scores_batch[f'hits@{k}'] * n_words
@@ -308,6 +318,9 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
     # if args.model == 'heteredgegat' and not args.use_diffusion_graph:
     #     data['graph_learner'].train()
     
+    scores['prec'] /= total
+    scores['rec'] /= total
+    scores['F1'] /= total
     scores['MRR'] /= total
     for k in k_list:
         scores[f'hits@{k}'] /= total
@@ -367,8 +380,8 @@ def main():
     edges_t = torch.LongTensor(user_edges) # (2,#num_edges)
     weight_t = torch.FloatTensor([1]*edges_t.size(1))
     graph = Data(edge_index=edges_t, edge_weight=weight_t)
-    if args.cuda:
-        graph = graph.to(args.gpu)
+    # if args.cuda:
+    #     graph = graph.to(args.gpu)
     
     # Use Manual Feats or Random Feats
     new_d = {'feat': None}
@@ -395,7 +408,7 @@ def main():
     if args.model == 'densegat':
         n_feat = n_units[0]*n_heads[0] if args.use_gat else n_units[0]
         model = BasicGATNetwork(n_feat=n_feat, n_units=n_units, n_heads=n_heads, num_interval=args.n_interval, shape_ret=(n_feat,train_data.user_size), 
-            attn_dropout=args.attn_dropout, dropout=args.dropout)
+            attn_dropout=args.attn_dropout, dropout=args.dropout, use_gat=args.use_gat)
     
     elif args.model == 'heteredgegat':
         base_filename = "topic_diffusion_graph"
@@ -411,7 +424,7 @@ def main():
         if args.sparsity < 100:
             sparsity_suffix = f"_sparsity{args.sparsity}.0"
         
-        # classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_graph/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
+        # classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_llm_ppx/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
         classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_llm2/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
         # if args.cuda:
         #     classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
@@ -419,6 +432,7 @@ def main():
         # n_adj = max(classid2simmat.keys())+1
         topk = args.graph_topk
         n_adj = min(len(classid2simmat), topk)
+        logger.info("n_adj : {}".format(n_adj))
         if args.tweet2graph == 0:
             # hedge_graphs = [graph] * (n_adj+1)
             hedge_graphs = [graph] * n_adj
@@ -426,14 +440,15 @@ def main():
             # hedge_graphs = [classid2simmat[classid] if classid in classid2simmat else graph for classid in range(n_adj)]
             
             # select topk interest graphs
-            clasid2len = {k: len(v) for k,v in classid2simmat.items()}
-            for k in sorted(clasid2len, key=clasid2len.get, reverse=True)[topk:]:
+            clasid2len = {k: v.edge_index.size(1) for k,v in classid2simmat.items()}
+            for k in sorted(clasid2len, key=clasid2len.get, reverse=True)[:-topk]:
                 classid2simmat.pop(k)
+            for k,v in classid2simmat.items():
+                logger.info("k = {}, v = {}".format(k, v.edge_index.size(1)))
             hedge_graphs = [graph for _, graph in classid2simmat.items()]
             if args.cuda:
                 hedge_graphs = [graph.to(args.gpu) for graph in hedge_graphs]
-            logger.info(len(hedge_graphs))
-        
+                
         # diffusion_graph = load_pickle(os.path.join(DATA_ROOTPATH, f"{args.dataset}/diffusion_graph.data"))
         # if args.cuda:
         #     diffusion_graph = diffusion_graph[sorted(diffusion_graph.keys())[-1]].to(args.gpu)
@@ -451,6 +466,7 @@ def main():
         use_add_attn = args.use_add_attn
         use_topic_selection = args.n_component is not None
         random_feat_dim = train_d['feat'].size(1) if train_d['feat'] is not None else None
+        # logger.info("random_feat_dim: {}".format(random_feat_dim))
         model = HeterEdgeGATNetwork(user_size=train_data.user_size, n_feat=n_feat, n_adj=n_adj, num_interval=args.n_interval, n_comp=args.n_component, 
             n_units=n_units, n_heads=n_heads, attn_dropout=args.attn_dropout, dropout=args.dropout, 
             use_gat=args.use_gat, use_time_decay=args.use_time_decay, 
@@ -528,6 +544,11 @@ def main():
     elif args.model == 'ndm':
         model = Decoder(train_data.user_size, d_k=64, d_v=64, d_model=64, d_word_vec=64, d_inner_hid=64, n_head=8, kernel_size=3, dropout=0.1) 
     
+    elif args.model == 'hidan':
+        config = Config()
+        config.num_nodes = train_data.user_size
+        model = HiDANModel(config)
+
     # loss_func = torch.nn.CrossEntropyLoss(ignore_index=PAD)
     loss_func = get_cascade_criterion(train_data.user_size)
 
