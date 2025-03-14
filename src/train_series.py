@@ -95,7 +95,7 @@ parser.add_argument('--hidden-units', type=str, default="16", help="Hidden units
 parser.add_argument('--heads', type=str, default="4", help="Heads in each layer, splitted with comma")
 parser.add_argument('--check-point', type=int, default=10, help="Check point")
 parser.add_argument('--gpu', type=str, default="cuda:0", help="Select GPU")
-parser.add_argument('--graph-topk', type=int, default=2, help="")
+parser.add_argument('--graph-topk', type=int, default=20, help="")
 # >> Ablation Study
 parser.add_argument('--use-random-multiedge', type=int, default=0, help="Use Random Multi-Edge to build Heter-Edge-Matrix if set true (Available only when model='heteredgegat')")
 parser.add_argument('--use-multi-deepwalk-feat', action='store_true', default=False, help="Use Multi-Heter Deepwalk-Feature if set true (Available only when model='heteredgegat')")
@@ -424,8 +424,8 @@ def main():
         if args.sparsity < 100:
             sparsity_suffix = f"_sparsity{args.sparsity}.0"
         
-        # classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_llm_ppx/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
-        classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_llm2/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
+        classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_llm_ppx/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
+        # classid2simmat = load_pickle(os.path.join(dataset_dirpath, f"topic_llm2/{base_filename}_windowsize{args.window_size}{sparsity_suffix}.data"))
         # if args.cuda:
         #     classid2simmat = {classid:simmat.to(args.gpu) for classid, simmat in classid2simmat.items()}
         
@@ -441,7 +441,7 @@ def main():
             
             # select topk interest graphs
             clasid2len = {k: v.edge_index.size(1) for k,v in classid2simmat.items()}
-            for k in sorted(clasid2len, key=clasid2len.get, reverse=True)[:-topk]:
+            for k in sorted(clasid2len, key=clasid2len.get, reverse=True)[topk:]:
                 classid2simmat.pop(k)
             for k,v in classid2simmat.items():
                 logger.info("k = {}, v = {}".format(k, v.edge_index.size(1)))
