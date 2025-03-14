@@ -249,7 +249,7 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
     #     data['graph_learner'].eval()
     
     loss, correct, total = 0., 0., 0.
-    scores = {'MRR': 0, 'F1': 0, 'prec': 0, 'rec': 0}
+    scores = {'MRR': 0,}
     for k in k_list:
         scores[f'hits@{k}'] = 0
         scores[f'map@{k}'] = 0
@@ -306,9 +306,9 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
         else:
             scores_batch = get_scores(pred_cascade, gold_cascade, k_list)
         
-        scores['prec'] += scores_batch['prec'] * n_words
-        scores['rec'] += scores_batch['rec'] * n_words
-        scores['F1'] += scores_batch['F1'] * n_words
+        # scores['prec'] += scores_batch['prec'] * n_words
+        # scores['rec'] += scores_batch['rec'] * n_words
+        # scores['F1'] += scores_batch['F1'] * n_words
         scores['MRR'] += scores_batch['MRR'] * n_words
         for k in k_list:
             scores[f'hits@{k}'] += scores_batch[f'hits@{k}'] * n_words
@@ -318,9 +318,9 @@ def evaluate(epoch_i, data, graph, model, optimizer, loss_func, writer, k_list=[
     # if args.model == 'heteredgegat' and not args.use_diffusion_graph:
     #     data['graph_learner'].train()
     
-    scores['prec'] /= total
-    scores['rec'] /= total
-    scores['F1'] /= total
+    # scores['prec'] /= total
+    # scores['rec'] /= total
+    # scores['F1'] /= total
     scores['MRR'] /= total
     for k in k_list:
         scores[f'hits@{k}'] /= total
